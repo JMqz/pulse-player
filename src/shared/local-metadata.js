@@ -1,4 +1,4 @@
-// Local audio file metadata (ID3v2 / FLAC Vorbis comments + ffprobe fallback) and embedded cover
+// Local audio file metadata (ID3v2 / FLAC Vorbis comments + ffprobe/ffmpeg fallback) and embedded cover
 // extraction. Shared by the Electron main process and the Pulse (Tauri) Node host.
 const fs = require('fs');
 const path = require('path');
@@ -226,6 +226,37 @@ async function extractLocalTrackMetadata(filePath, coversDir) {
               if (!isNaN(d) && d > 0) duration = d;
             }
           } catch (e) {}
+        }
+        resolve();
+      });
+    });
+  } else if ((!title || !artist || !duration) && ffmpegBin) {
+    // Pulse ships ffmpeg only: `ffmpeg -i` prints the container tags and duration to stderr.
+    await new Promise(resolve => {
+      execFile(ffmpegBin, ['-hide_banner', '-i', filePath], { timeout: 5000 }, (_err, _stdout, stderr) => {
+        const text = String(stderr || '');
+        const meta = text.split(/\r?\n/).slice(0, 80);
+        const getTag = (name) => {
+          const re = new RegExp(`^\\s+${name}\\s*:\\s*(.+)$`, 'i');
+          for (const line of meta) {
+            const m = line.match(re);
+            if (m) return m[1].trim();
+          }
+          return '';
+        };
+        if (!title) title = getTag('title');
+        if (!artist) artist = getTag('artist') || getTag('album_artist') || getTag('composer');
+        if (!album) album = getTag('album');
+        if (!trackNum) {
+          const n = parseInt(getTag('track').split('/')[0], 10);
+          if (!isNaN(n)) trackNum = n;
+        }
+        if (!duration) {
+          const m = text.match(/Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/);
+          if (m) {
+            const d = (+m[1]) * 3600 + (+m[2]) * 60 + parseFloat(m[3]);
+            if (d > 0) duration = d;
+          }
         }
         resolve();
       });

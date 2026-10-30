@@ -8,7 +8,7 @@
     src\renderer, src\server, src\host, src\shared
     assets\
     runtime\node.exe                       media server runtime
-    bin\yt-dlp.exe, ffmpeg.exe, ffprobe.exe
+    bin\yt-dlp.exe, ffmpeg.exe
 
   The media server has no npm dependencies (Node built-ins only), so no node_modules is shipped.
   Tools are taken from bin\, %LOCALAPPDATA%\Pulse\bin or %LOCALAPPDATA%\Riff\bin, and downloaded
@@ -71,8 +71,8 @@ if (-not (Find-Tool 'yt-dlp.exe')) {
     if ((Get-FileHash "$dest.download" -Algorithm SHA256).Hash.ToLower() -ne $want) { throw 'yt-dlp checksum mismatch' }
     Move-Item "$dest.download" $dest -Force
 }
-if (-not (Find-Tool 'ffmpeg.exe') -or -not (Find-Tool 'ffprobe.exe')) {
-    Step 'Downloading ffmpeg/ffprobe (github.com/yt-dlp/FFmpeg-Builds)'
+if (-not (Find-Tool 'ffmpeg.exe')) {
+    Step 'Downloading ffmpeg (github.com/yt-dlp/FFmpeg-Builds)'
     New-Item -ItemType Directory -Force -Path $fetchDir | Out-Null
     $base = 'https://github.com/yt-dlp/FFmpeg-Builds/releases/latest/download'
     $asset = 'ffmpeg-master-latest-win64-gpl.zip'
@@ -84,10 +84,8 @@ if (-not (Find-Tool 'ffmpeg.exe') -or -not (Find-Tool 'ffprobe.exe')) {
     if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() -ne $want) { throw 'ffmpeg checksum mismatch' }
     & "$env:SystemRoot\System32\tar.exe" -xf $zip -C $tmp
     if ($LASTEXITCODE) { throw 'extracting ffmpeg failed' }
-    foreach ($exe in 'ffmpeg.exe', 'ffprobe.exe') {
-        $src = Get-ChildItem $tmp -Recurse -Filter $exe | Select-Object -First 1
-        Copy-Item $src.FullName (Join-Path $fetchDir $exe) -Force
-    }
+    $src = Get-ChildItem $tmp -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
+    Copy-Item $src.FullName (Join-Path $fetchDir 'ffmpeg.exe') -Force
     Remove-Item -Recurse -Force $tmp
 }
 
@@ -102,12 +100,17 @@ foreach ($dir in 'renderer', 'server', 'host', 'shared') {
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
     Copy-Item (Join-Path $root "src\$dir\*") $dest -Recurse
 }
-# Onboarding page of the old Electron shell; Pulse never loads it.
-Remove-Item (Join-Path $stage 'src\renderer\welcome.html') -ErrorAction SilentlyContinue
-Copy-Item (Join-Path $root 'assets') (Join-Path $stage 'assets') -Recurse
+# Only the assets the UI and installer reference; anything else left in assets\ stays out.
+$assetsStage = Join-Path $stage 'assets'
+New-Item -ItemType Directory -Force -Path (Join-Path $assetsStage 'fonts') | Out-Null
+foreach ($f in 'hls.min.js', 'icon.ico', 'icon.png', 'pulse.svg') {
+    Copy-Item (Join-Path $root "assets\$f") $assetsStage
+}
+Copy-Item (Join-Path $root 'assets\fonts\*') (Join-Path $assetsStage 'fonts')
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'runtime'), (Join-Path $stage 'bin') | Out-Null
 Copy-Item (Join-Path $root 'runtime\node.exe') (Join-Path $stage 'runtime')
-foreach ($exe in 'yt-dlp.exe', 'ffmpeg.exe', 'ffprobe.exe') {
+# ffprobe is not shipped: local-file metadata falls back to `ffmpeg -i`.
+foreach ($exe in 'yt-dlp.exe', 'ffmpeg.exe') {
     Copy-Item (Find-Tool $exe) (Join-Path $stage 'bin')
 }
 

@@ -8,7 +8,6 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { execFile, spawn } = require('child_process');
 
 const platform = require('../shared/platform');
 const { log, tail, LOG_DIR } = require('../shared/logger');
@@ -37,11 +36,6 @@ const MIME = {
 
 function defaultDownloadsDir() {
   return path.join(os.homedir(), 'Downloads');
-}
-
-function openInBrowser(target) {
-  // rundll32 hands the URL to the default protocol handler without cmd.exe quoting pitfalls.
-  spawn('rundll32.exe', ['url.dll,FileProtocolHandler', target], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
 }
 
 // ---------- local files ----------
@@ -147,7 +141,9 @@ function serveFile(req, res, filePath) {
   return fs.createReadStream(filePath).pipe(res);
 }
 
-// ---------- Google / YouTube cookies (yt-dlp --cookies-from-browser) ----------
+// ---------- Google / YouTube cookies ----------
+// The cookie file is only ever written by the explicit sign-in window (src-tauri/src/google.rs);
+// browser cookie stores are never read.
 
 function hasValidYtCookiesFile() {
   try {
@@ -156,43 +152,6 @@ function hasValidYtCookiesFile() {
   } catch (_) {
     return false;
   }
-}
-
-function candidateBrowserSpecs() {
-  const local = process.env.LOCALAPPDATA || '';
-  const roaming = process.env.APPDATA || '';
-  const specs = [];
-  const addIfDir = (dir, spec) => { try { if (fs.existsSync(dir) && !specs.includes(spec)) specs.push(spec); } catch (_) {} };
-  addIfDir(path.join(local, 'Microsoft', 'Edge'), 'edge');
-  addIfDir(path.join(local, 'Google', 'Chrome'), 'chrome');
-  addIfDir(path.join(local, 'BraveSoftware', 'Brave-Browser'), 'brave');
-  addIfDir(path.join(roaming, 'Mozilla', 'Firefox'), 'firefox');
-  addIfDir(path.join(roaming, 'Zen'), 'firefox:' + path.join(roaming, 'Zen'));
-  addIfDir(path.join(local, 'Vivaldi'), 'vivaldi');
-  return specs;
-}
-
-// Chromium browsers' cookie stores are app-bound encrypted on Windows, so this import usually fails;
-// try it once per run and leave sign-in to the in-app window (src-tauri/src/google.rs).
-let browserImportTried = false;
-async function exportYoutubeCookiesToDisk() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (hasValidYtCookiesFile()) return true;
-  if (browserImportTried) return false;
-  browserImportTried = true;
-  const ytdlp = platform.resolveBinary('yt-dlp');
-  if (!ytdlp) return false;
-  for (const spec of candidateBrowserSpecs()) {
-    await new Promise((resolve) => {
-      execFile(ytdlp, ['--no-config', '--cookies-from-browser', spec, '--cookies', YT_COOKIES_FILE, '--skip-download', '--no-warnings',
-        'https://www.youtube.com/watch?v=dQw4w9WgXcQ'], { timeout: 12000, windowsHide: true }, () => resolve());
-    });
-    if (hasValidYtCookiesFile()) {
-      try { fs.rmSync(YT_LOGOUT_FLAG, { force: true }); } catch (_) {}
-      return true;
-    }
-  }
-  return false;
 }
 
 function readGoogleCookies() {
@@ -264,6 +223,39 @@ function setDownloadDir(payload) {
   return { ok: true, dir: target };
 }
 
+// ---------- user-chosen file paths (export/import) ----------
+// Paths come from the native save/open dialog, but the route itself is reachable by anything holding
+// the token, so the extension and location are checked here too.
+const EXECUTABLE_EXT = new Set(['.exe', '.com', '.bat', '.cmd', '.ps1', '.psm1', '.psd1', '.vbs', '.vbe', '.js', '.jse',
+  '.wsf', '.wsh', '.msi', '.msp', '.scr', '.pif', '.lnk', '.url', '.hta', '.cpl', '.dll', '.sys', '.reg', '.inf', '.jar', '.sh']);
+function isInside(child, parent) {
+  const rel = path.relative(parent.toLowerCase(), child.toLowerCase());
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+function checkUserFile(raw, allowedExt) {
+  const str = typeof raw === 'string' ? raw : '';
+  if (!str || str.includes('\0')) throw new Error('Invalid path');
+  // No UNC/device paths (\\server\share, \\?\, \\.\) and no NTFS alternate data streams (name:stream).
+  if (/^[\\/]{2}/.test(str) || str.slice(2).includes(':')) throw new Error('Invalid path');
+  if (!path.isAbsolute(str)) throw new Error('Invalid path');
+  const full = path.resolve(str);
+  const base = path.basename(full).replace(/[. ]+$/, '');
+  const ext = path.extname(base).toLowerCase();
+  if (!allowedExt.has(ext) || EXECUTABLE_EXT.has(ext)) throw new Error('File type not allowed');
+  const startup = path.join(process.env.APPDATA || '', 'Microsoft', 'Windows', 'Start Menu');
+  if (process.env.APPDATA && isInside(full, startup)) throw new Error('Location not allowed');
+  const sysRoots = [process.env.SystemRoot, process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.ProgramData]
+    .filter(Boolean);
+  if (sysRoots.some((r) => isInside(full, r))) throw new Error('Location not allowed');
+  return full;
+}
+
+// Any user folder is fine (Documents, Desktop, a music drive...) as long as the type is one Pulse
+// writes; system folders and the Startup menu are refused above.
+const EXPORT_TEXT_EXT = new Set(['.json', '.txt', '.m3u', '.m3u8', '.csv']);
+const ACCOUNT_EXT = new Set(['.pulseacc', '.rfacc', '.json']);
+
 // ---------- route table ----------
 
 let logCount = 0;
@@ -290,13 +282,20 @@ const ROUTES = {
   },
   'download-dir-set': (b) => setDownloadDir(b),
   'account-export': async (b) => {
-    await fs.promises.writeFile(String(b.path), encryptAccount(b.payload || {}));
-    return { success: true, filePath: b.path };
+    const fp = checkUserFile(b.path, ACCOUNT_EXT);
+    await fs.promises.writeFile(fp, encryptAccount(b.payload || {}));
+    return { success: true, filePath: fp };
   },
-  'account-import': async (b) => ({ success: true, data: decryptAccount(await fs.promises.readFile(String(b.path))), filePath: b.path }),
+  'account-import': async (b) => {
+    const fp = checkUserFile(b.path, ACCOUNT_EXT);
+    const st = await fs.promises.stat(fp);
+    if (!st.isFile() || st.size > 64 * 1024 * 1024) throw new Error('Invalid account file');
+    return { success: true, data: decryptAccount(await fs.promises.readFile(fp)), filePath: fp };
+  },
   'write-text': async (b) => {
-    await fs.promises.writeFile(String(b.path), String(b.content || ''), 'utf8');
-    return { success: true, filePath: b.path };
+    const fp = checkUserFile(b.path, EXPORT_TEXT_EXT);
+    await fs.promises.writeFile(fp, String(b.content || ''), 'utf8');
+    return { success: true, filePath: fp };
   },
   'diagnostics': (b) => {
     const lines = [`Pulse ${b.version || ''}`, `OS ${process.platform} ${process.arch} ${os.release()}`,
@@ -315,27 +314,12 @@ const ROUTES = {
     if (logCount++ < 20) log(b.level || 'ERROR', b.message || '', b.stack || null);
     return true;
   },
-  'google-auth-status': async () => {
-    if (fs.existsSync(YT_LOGOUT_FLAG)) return { loggedIn: false };
-    if (hasValidYtCookiesFile()) return { loggedIn: true };
-    return { loggedIn: await exportYoutubeCookiesToDisk().catch(() => false) };
-  },
+  'google-auth-status': () => ({ loggedIn: !fs.existsSync(YT_LOGOUT_FLAG) && hasValidYtCookiesFile() }),
   'google-logout': () => {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.writeFileSync(YT_LOGOUT_FLAG, '1', 'utf8');
     fs.rmSync(YT_COOKIES_FILE, { force: true });
     return { success: true };
-  },
-  'google-login': async () => {
-    try { fs.rmSync(YT_LOGOUT_FLAG, { force: true }); } catch (_) {}
-    if (await exportYoutubeCookiesToDisk()) return { success: true, loggedIn: true };
-    openInBrowser('https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2F');
-    const start = Date.now();
-    while (Date.now() - start < 90000) {
-      await new Promise((r) => setTimeout(r, 3500));
-      if (await exportYoutubeCookiesToDisk()) return { success: true, loggedIn: true };
-    }
-    return { success: false, loggedIn: false };
   },
   'google-import-library': (b) => googleImportLibrary(b)
 };
@@ -383,9 +367,4 @@ function createHostHandler() {
   };
 }
 
-function startupCookieSync() {
-  if (fs.existsSync(YT_LOGOUT_FLAG)) return Promise.resolve(false);
-  return exportYoutubeCookiesToDisk();
-}
-
-module.exports = { createHostHandler, startupCookieSync };
+module.exports = { createHostHandler };

@@ -3,10 +3,15 @@
 //! The renderer keeps its whole localStorage map in memory and pushes snapshots here:
 //! debounced saves are flushed 250 ms after the last one, sync saves are written at once,
 //! and whatever is pending is flushed when the app exits.
+//!
+//! storage.json holds the whole library, so every write goes through a fsynced temp file and the
+//! previous version is kept as storage.json.bak. At startup an unreadable storage.json is moved
+//! aside (storage.json.corrupt-<unix time>) and the backup restored, so a damaged file is never
+//! read as "no data" and then overwritten with an empty library.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::paths;
 
@@ -23,6 +28,8 @@ pub struct Storage {
     storage_file: PathBuf,
     cache_file: PathBuf,
     inner: Arc<Mutex<Inner>>,
+    /// Serializes the backup rotation + replace of storage.json across save threads.
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl Storage {
@@ -32,9 +39,33 @@ impl Storage {
             storage_file: dir.join("storage.json"),
             cache_file: dir.join("cache.json"),
             inner: Arc::default(),
+            write_lock: Arc::default(),
         };
         storage.migrate_from_riff();
+        storage.recover();
         storage
+    }
+
+    /// Restores storage.json from its backup when it is missing or not valid JSON.
+    fn recover(&self) {
+        let main = &self.storage_file;
+        let main_ok = match std::fs::read(main) {
+            Ok(bytes) => is_json_object(&bytes),
+            Err(_) => false,
+        };
+        if main_ok {
+            return;
+        }
+        if main.exists() {
+            let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let _ = std::fs::rename(main, main.with_file_name(format!("storage.json.corrupt-{stamp}")));
+        }
+        let bak = backup_path(main);
+        if let Ok(bytes) = std::fs::read(&bak) {
+            if is_json_object(&bytes) {
+                let _ = paths::write_atomic(main, &bytes);
+            }
+        }
     }
 
     /// First run: copy the Electron Riff library (playlists, settings) instead of starting empty.
@@ -54,10 +85,14 @@ impl Storage {
         if let Some(latest) = self.inner.lock().unwrap().latest.clone() {
             return latest.to_vec();
         }
-        match std::fs::read(&self.storage_file) {
-            Ok(bytes) if is_json_object(&bytes) => bytes,
-            _ => b"null".to_vec(),
+        for file in [self.storage_file.clone(), backup_path(&self.storage_file)] {
+            if let Ok(bytes) = std::fs::read(&file) {
+                if is_json_object(&bytes) {
+                    return bytes;
+                }
+            }
         }
+        b"null".to_vec()
     }
 
     pub fn save_storage(&self, body: Vec<u8>, debounce: bool) -> bool {
@@ -73,11 +108,12 @@ impl Storage {
             inner.generation
         };
         if !debounce {
-            let _ = paths::write_atomic(&self.storage_file, &body);
+            let _ = write_storage_file(&self.storage_file, &body, &self.write_lock);
             return true;
         }
         let inner = self.inner.clone();
         let file = self.storage_file.clone();
+        let write_lock = self.write_lock.clone();
         std::thread::spawn(move || {
             std::thread::sleep(DEBOUNCE);
             let snapshot = {
@@ -89,7 +125,7 @@ impl Storage {
                 guard.latest.clone()
             };
             if let Some(bytes) = snapshot {
-                let _ = paths::write_atomic(&file, &bytes);
+                let _ = write_storage_file(&file, &bytes, &write_lock);
             }
         });
         true
@@ -105,7 +141,7 @@ impl Storage {
             inner.latest.clone()
         };
         if let Some(bytes) = snapshot {
-            let _ = paths::write_atomic(&self.storage_file, &bytes);
+            let _ = write_storage_file(&self.storage_file, &bytes, &self.write_lock);
         }
     }
 
@@ -121,6 +157,25 @@ impl Storage {
     }
 }
 
+fn backup_path(file: &Path) -> PathBuf {
+    file.with_file_name("storage.json.bak")
+}
+
+/// temp file (fsynced) -> current storage.json becomes .bak -> temp becomes storage.json.
+/// A crash between the two renames leaves only the .bak, which `read_storage`/`recover` use.
+fn write_storage_file(file: &Path, bytes: &[u8], lock: &Mutex<()>) -> std::io::Result<()> {
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = paths::write_temp(file, bytes)?;
+    if file.is_file() {
+        let _ = std::fs::rename(file, backup_path(file));
+    }
+    std::fs::rename(&tmp, file).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// A complete, parseable JSON object (a truncated file fails here, not just a wrong first byte).
 fn is_json_object(bytes: &[u8]) -> bool {
     bytes.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'{')
+        && serde_json::from_slice::<serde::de::IgnoredAny>(bytes).is_ok()
 }

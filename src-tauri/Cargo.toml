@@ -1,6 +1,6 @@
 [package]
 name = "pulse"
-version = "1.0.0"
+version = "1.1.0"
 description = "Pulse - lightweight YouTube Music / YouTube / Spotify player on Tauri v2 + WebView2"
 edition = "2021"
 publish = false

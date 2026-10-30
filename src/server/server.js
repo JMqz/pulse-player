@@ -17,6 +17,56 @@ const { StringDecoder } = require("string_decoder");
 const dns = require('dns');
 const net = require('net');
 
+// ---------- SSRF guard for the audio/image proxies ----------
+// The proxies only ever need public media hosts; loopback, private, link-local, CGNAT and
+// unique-local ranges are refused both for IP literals and for whatever a hostname resolves to.
+function isPrivateAddress(ip) {
+  let addr = String(ip || '').replace(/^\[|\]$/g, '').toLowerCase();
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(addr);
+  if (mapped) addr = mapped[1];
+  const kind = net.isIP(addr);
+  if (kind === 4) {
+    const [a, b] = addr.split('.').map(Number);
+    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
+  }
+  if (kind === 6) {
+    return addr === '::' || addr === '::1' || /^f[cd]/.test(addr) || /^fe[89ab]/.test(addr) || /^ff/.test(addr);
+  }
+  return false;
+}
+
+function isBlockedProxyHost(hostname) {
+  const h = String(hostname || '').replace(/^\[|\]$/g, '').toLowerCase().replace(/\.$/, '');
+  if (!h) return true;
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  return net.isIP(h) ? isPrivateAddress(h) : false;
+}
+
+// `lookup` for http(s).request: rejects at connect time, so redirects and DNS rebinding are covered too.
+function safeProxyLookup(hostname, options, callback) {
+  if (typeof options === 'function') { callback = options; options = {}; }
+  dns.lookup(hostname, options, (err, address, family) => {
+    if (err) return callback(err);
+    const list = Array.isArray(address) ? address : [{ address, family }];
+    const bad = list.find((a) => isPrivateAddress(a.address));
+    if (bad) return callback(Object.assign(new Error('Blocked private address ' + bad.address), { code: 'EBLOCKED' }));
+    return callback(null, address, family);
+  });
+}
+
+async function assertPublicHttpUrl(target) {
+  let u;
+  try { u = new URL(target); } catch (_) { throw new Error('Invalid url'); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('Unsupported protocol');
+  if (isBlockedProxyHost(u.hostname)) throw new Error('Blocked target');
+  if (!net.isIP(u.hostname.replace(/^\[|\]$/g, ''))) {
+    const addrs = await dns.promises.lookup(u.hostname, { all: true });
+    if (!addrs.length || addrs.some((a) => isPrivateAddress(a.address))) throw new Error('Blocked target');
+  }
+  return u;
+}
+
 // Pulse: the Tauri host chooses the port/token before the UI loads and hands them over via env.
 // PORT stays a module-level binding because stream proxy URLs are built from it.
 let PORT = Number(process.env.PULSE_PORT) > 0 ? Number(process.env.PULSE_PORT) : 38472;
@@ -115,6 +165,19 @@ function boundMap(map, maxSize = 35) {
       }
     }
   }
+}
+
+// Map whose set() keeps at most maxSize entries, evicting the least recently written.
+function boundedMap(maxSize) {
+  const map = new Map();
+  const set = map.set.bind(map);
+  map.set = (key, value) => {
+    if (map.has(key)) map.delete(key);
+    set(key, value);
+    boundMap(map, maxSize);
+    return map;
+  };
+  return map;
 }
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -268,8 +331,8 @@ const urlCache = streamUrlCache;
 const streamInfoInflight = new Map();
 const lyricsCache = new Map();
 const artistCache = new Map();
-const vibeCache = new Map();
-const ytArtistCache = new Map();
+const vibeCache = boundedMap(50);
+const ytArtistCache = boundedMap(100);
 const scClientCache = new Map();
 const downloadingSet = new Set();
 const prefetchingSet = new Set();
@@ -1047,7 +1110,7 @@ async function httpGetJson(url, timeoutMs = 6000) {
     try {
       const parsed = new URL(url);
       const mod = parsed.protocol === 'http:' ? http : https;
-      const req = mod.get(url, { family: 4, headers: { 'User-Agent': 'Riff' }, timeout: timeoutMs }, (res) => {
+      const req = mod.get(url, { family: 4, headers: { 'User-Agent': 'Pulse-Desktop-Player/1.0' }, timeout: timeoutMs }, (res) => {
         if (res.statusCode < 200 || res.statusCode >= 300) {
           res.resume();
           return resolve(null);
@@ -1083,7 +1146,7 @@ async function httpGetJson(url, timeoutMs = 6000) {
   });
 }
 
-const dzArtistIdCache = new Map();
+const dzArtistIdCache = boundedMap(100);
 
 async function dzArtistId(name) {
   if (!name || typeof name !== 'string') return null;
@@ -1165,7 +1228,7 @@ async function dzRadioTracks(artist) {
   }
 }
 
-const ytMixCache = new Map();
+const ytMixCache = boundedMap(50);
 
 async function ytMixTracks(seed) {
   if (!seed || (!seed.artist && !seed.title)) return [];
@@ -2442,94 +2505,201 @@ async function handleVibeRecommendations(req, res, payload) {
   }
 }
 
-let serverTrendingCache = { ts: 0, tracks: [] };
+const YTM_RADIO_TTL = 60 * 60 * 1000;
+const ytmRadioCache = new Map();
+const recommendationsCache = new Map();
+// Radios/recommendations are requested for the Brazilian catalog and charts.
+const YTM_RADIO_LOCALE = { hl: 'pt', gl: 'BR' };
 
-function fetchItunesTopSongs(limit = 24) {
-  return new Promise((resolve) => {
-    const req = https.get('https://itunes.apple.com/us/rss/topsongs/limit=' + limit + '/json', {
+function ytmNextRequest(videoId, timeoutMs = 6000) {
+  const body = JSON.stringify({
+    context: { client: { clientName: 'WEB_REMIX', clientVersion: YTM_CLIENT_VERSION, ...YTM_RADIO_LOCALE } },
+    videoId,
+    playlistId: `RDAMVM${videoId}`,
+    isAudioOnly: true,
+    enablePersistentPlaylistPanel: true,
+    tunerSettingValue: 'AUTOMIX_SETTING_NORMAL'
+  });
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'music.youtube.com',
+      path: '/youtubei/v1/next?prettyPrint=false',
+      method: 'POST',
+      agent: keepAliveHttpsAgent,
       family: 4,
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
-      timeout: 6000
+      timeout: timeoutMs,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        'Origin': 'https://music.youtube.com',
+        'Referer': 'https://music.youtube.com/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+      }
     }, (res) => {
-      let body = '';
-      res.on('data', chunk => { body += chunk; });
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        res.resume();
+        return reject(new Error(`ytmusic next status ${res.statusCode}`));
+      }
+      let raw = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { raw += chunk; });
       res.on('end', () => {
-        try {
-          const json = JSON.parse(body);
-          const entries = Array.isArray(json?.feed?.entry) ? json.feed.entry : [];
-          const tracks = entries.map((e, idx) => {
-            const imgs = Array.isArray(e['im:image']) ? e['im:image'] : [];
-            const rawImg = imgs.length ? (imgs[imgs.length - 1].label || '') : '';
-            const hiImg = rawImg.replace(new RegExp('\\/\\d+x\\d+bb\\.', 'i'), '/600x600bb.');
-            const idAttr = e?.id?.attributes?.['im:id'] || String(idx);
-            return {
-              id: 'it-' + idAttr,
-              title: e?.['im:name']?.label || 'Untitled',
-              artist: e?.['im:artist']?.label || 'Unknown artist',
-              thumbnail: hiImg,
-              cover: hiImg,
-              duration: 0,
-              platform: 'ytmusic',
-              url: ''
-            };
-          }).filter(t => t.title && t.title !== 'Untitled');
-          resolve(tracks);
-        } catch (_) { resolve([]); }
+        try { resolve(JSON.parse(raw)); } catch (err) { reject(err); }
       });
     });
-    req.on('error', () => resolve([]));
-    req.on('timeout', () => { req.destroy(); resolve([]); });
+    req.on('timeout', () => { req.destroy(new Error('ytmusic next timeout')); });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
   });
 }
 
-async function handleTrending(req, res) {
-  if (serverTrendingCache.tracks.length > 0 && Date.now() - serverTrendingCache.ts < 2 * 3600 * 1000) {
+function parseYtmRadio(json) {
+  const tabs = json?.contents?.singleColumnMusicWatchNextResultsRenderer?.tabbedRenderer?.watchNextTabbedResultsRenderer?.tabs || [];
+  const items = tabs[0]?.tabRenderer?.content?.musicQueueRenderer?.content?.playlistPanelRenderer?.contents || [];
+  const out = [];
+  for (const wrap of items) {
+    const v = wrap?.playlistPanelVideoRenderer || wrap?.playlistPanelVideoWrapperRenderer?.primaryRenderer?.playlistPanelVideoRenderer;
+    if (!v || !v.videoId || !/^[\w-]{11}$/.test(v.videoId)) continue;
+    const title = (v.title?.runs || []).map(r => r.text).join('').trim();
+    const segments = [];
+    let cur = [];
+    for (const run of (v.longBylineText?.runs || [])) {
+      if (run.text === ' • ') { segments.push(cur.join('').trim()); cur = []; } else cur.push(run.text);
+    }
+    segments.push(cur.join('').trim());
+    const artist = stripYoutubeTopic(segments[0] || '');
+    const album = segments.length > 2 ? segments[1] : '';
+    const duration = parseYtmDuration(v.lengthText?.runs?.[0]?.text || '');
+    const thumbs = v.thumbnail?.thumbnails || [];
+    let thumbnail = thumbs.length ? thumbs[thumbs.length - 1].url : `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`;
+    thumbnail = thumbnail.replace(/=w\d+-h\d+[^&]*$/, '=w544-h544');
+    const isExplicit = (v.badges || []).some(b => b?.musicInlineBadgeRenderer?.icon?.iconType === 'MUSIC_EXPLICIT_BADGE');
+    if (!title || !artist) continue;
+    out.push({
+      id: v.videoId,
+      title,
+      artist,
+      album,
+      duration,
+      thumbnail,
+      cover: thumbnail,
+      url: `https://www.youtube.com/watch?v=${v.videoId}`,
+      platform: 'youtube',
+      isExplicit
+    });
+  }
+  return out;
+}
+
+async function ytmRadioTracks(videoId) {
+  const cached = ytmRadioCache.get(videoId);
+  if (cached && Date.now() - cached.ts < YTM_RADIO_TTL) return cached.tracks;
+  const tracks = parseYtmRadio(await ytmNextRequest(videoId));
+  if (tracks.length > 0) {
+    ytmRadioCache.set(videoId, { ts: Date.now(), tracks });
+    boundMap(ytmRadioCache, 200);
+  }
+  return tracks;
+}
+
+// Spotify/local tracks have no YouTube videoId: resolve them by searching "artist title".
+async function resolveSeedVideoId(seed) {
+  const id = String(seed?.id || '').trim();
+  if (/^[\w-]{11}$/.test(id)) return id;
+  const fromUrl = String(seed?.url || '').match(/[?&]v=([\w-]{11})/);
+  if (fromUrl) return fromUrl[1];
+  const artist = String(seed?.artist || '').trim();
+  const title = String(seed?.title || '').trim();
+  if (!title) return '';
+  const found = await searchYtmTracks(`${artist} ${title}`.trim(), 3).catch(() => []);
+  return (found && found[0] && found[0].id) || '';
+}
+
+function withTimeout(promise, ms, fallback) {
+  let timer;
+  return Promise.race([
+    promise.catch(() => fallback),
+    new Promise(resolve => { timer = setTimeout(() => resolve(fallback), ms); })
+  ]).finally(() => clearTimeout(timer));
+}
+
+async function buildRecommendations(seeds, excludeIds, excludeKeys, limit) {
+  const seedIds = new Set();
+  const perSeed = await Promise.all(seeds.map(seed => withTimeout((async () => {
+    const vid = await resolveSeedVideoId(seed);
+    if (!vid) return [];
+    seedIds.add(vid);
+    return ytmRadioTracks(vid);
+  })(), 8000, [])));
+
+  const seenIds = new Set([...excludeIds, ...seedIds]);
+  const seenKeys = new Set(excludeKeys);
+  seeds.forEach(s => { if (s.artist && s.title) seenKeys.add(getTrackNormalizedKey(s.artist, s.title)); });
+  const lists = perSeed.map(list => (list || []).filter(t => !isSpamOrUnofficial(t.title, t.duration, t.artist)));
+
+  // Round-robin across seeds so every seed contributes; at most 2 tracks per artist.
+  const artistCount = new Map();
+  const out = [];
+  const maxLen = Math.max(0, ...lists.map(l => l.length));
+  for (let i = 0; i < maxLen && out.length < limit; i++) {
+    for (const list of lists) {
+      if (out.length >= limit) break;
+      const t = list[i];
+      if (!t) continue;
+      const key = getTrackNormalizedKey(t.artist, t.title);
+      if (seenIds.has(t.id) || seenKeys.has(key)) continue;
+      const artistKey = String(t.artist).toLowerCase();
+      if ((artistCount.get(artistKey) || 0) >= 2) continue;
+      seenIds.add(t.id);
+      seenKeys.add(key);
+      artistCount.set(artistKey, (artistCount.get(artistKey) || 0) + 1);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+async function handleRecommendations(req, res, payload) {
+  const seeds = (Array.isArray(payload?.seeds) ? payload.seeds : [])
+    .filter(s => s && (s.id || s.title))
+    .slice(0, 10)
+    .map(s => ({ id: String(s.id || ''), url: String(s.url || ''), title: String(s.title || ''), artist: String(s.artist || '') }));
+  const excludeIds = new Set((Array.isArray(payload?.exclude) ? payload.exclude : []).map(String));
+  const excludeKeys = new Set((Array.isArray(payload?.excludeKeys) ? payload.excludeKeys : []).map(String));
+  const limit = Math.max(1, Math.min(parseInt(payload?.limit || '24', 10) || 24, 50));
+
+  if (seeds.length === 0) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ success: true, tracks: serverTrendingCache.tracks }));
-    return;
+    return res.end(JSON.stringify({ success: true, tracks: [] }));
   }
-  let tracks = await fetchItunesTopSongs(24);
-  if (!tracks || tracks.length === 0) {
-    try {
-      const dzChart = await httpGetJson('https://api.deezer.com/chart/0/tracks?limit=24', 5000);
-      const entries = Array.isArray(dzChart?.data) ? dzChart.data : [];
-      tracks = entries.map(item => {
-        const cover = item.album?.cover_xl || item.album?.cover_big || item.album?.cover_medium || '';
-        return {
-          id: item.id ? `dz-${item.id}` : '',
-          title: item.title || 'Untitled',
-          artist: item.artist?.name || 'Unknown artist',
-          thumbnail: cover,
-          cover: cover,
-          duration: Number(item.duration) || 0,
-          platform: 'ytmusic',
-          url: ''
-        };
-      }).filter(t => t.title && (t.id || t.artist));
-    } catch (_) { tracks = []; }
+
+  // Key on the actual seeds and exclusions (not just their counts), so two requests with the
+  // same number of excludes never share a result list.
+  const cacheKey = crypto.createHash('sha1').update(JSON.stringify([
+    seeds.map(s => s.id || `${s.artist}::${s.title}`.toLowerCase()).sort(),
+    [...excludeIds].sort(),
+    [...excludeKeys].sort(),
+    limit
+  ])).digest('hex');
+  const cached = recommendationsCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < YTM_RADIO_TTL) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ success: true, cached: true, tracks: cached.tracks }));
   }
-  if (!tracks || tracks.length === 0) {
-    try {
-      const ytmSongs = await searchYtmTracks('Top Hits 2026', 20);
-      const entries = Array.isArray(ytmSongs) ? ytmSongs : [];
-      tracks = entries.map(item => ({
-        id: item.id || '',
-        title: item.title || 'Untitled',
-        artist: item.artist || 'Unknown artist',
-        thumbnail: item.thumbnail || '',
-        cover: item.thumbnail || '',
-        duration: Number(item.duration) || 0,
-        platform: 'ytmusic',
-        url: item.url || (item.id ? `https://www.youtube.com/watch?v=${item.id}` : '')
-      })).filter(t => t.title && (t.id || t.artist));
-    } catch (_) { tracks = []; }
+
+  try {
+    const tracks = await buildRecommendations(seeds, excludeIds, excludeKeys, limit);
+    if (tracks.length > 0) {
+      recommendationsCache.set(cacheKey, { ts: Date.now(), tracks });
+      boundMap(recommendationsCache, 20);
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, tracks }));
+  } catch (error) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: false, error: error.message }));
   }
-  if (tracks && tracks.length > 0) {
-    serverTrendingCache = { ts: Date.now(), tracks };
-    boundMap(serverTrendingCache, 35);
-  }
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ success: true, tracks: tracks || [] }));
 }
 
 function scoreImportedCandidate(targetTitle, targetArtist, targetDur, cand) {
@@ -3569,7 +3739,10 @@ async function handleGoogleVideoChunkedProxy(req, res, targetUrl, initialUrl, vi
     } else {
       headers['Range'] = 'bytes=' + pos + '-' + end;
     }
-    const r = https.request(u, { method: 'GET', family: 4, agent: keepAliveHttpsAgent, headers, timeout: 20000 }, (pr) => {
+    let host = '';
+    try { host = new URL(u).hostname; } catch (_) {}
+    if (isBlockedProxyHost(host)) return reject(new Error('Blocked target'));
+    const r = https.request(u, { method: 'GET', family: 4, lookup: safeProxyLookup, agent: keepAliveHttpsAgent, headers, timeout: 20000 }, (pr) => {
       if ([301, 302, 303, 307, 308].includes(pr.statusCode) && pr.headers.location) {
         pr.resume();
         return resolve({ redirect: new URL(pr.headers.location, u).toString() });
@@ -3739,7 +3912,7 @@ async function handleAudioProxy(req, res, targetUrl, redirectsLeft = 5, origUrl 
       return res.end('Unsupported protocol');
     }
     const hostLower = (parsed.hostname || '').toLowerCase();
-    if (hostLower === 'localhost' || hostLower === '127.0.0.1' || hostLower === '::1') {
+    if (isBlockedProxyHost(hostLower)) {
       res.writeHead(403);
       return res.end('Blocked target');
     }
@@ -3782,6 +3955,7 @@ async function handleAudioProxy(req, res, targetUrl, redirectsLeft = 5, origUrl 
     const proxyReq = client.request(targetUrl, {
       method: req.method,
       family: 4,
+      lookup: safeProxyLookup,
       agent: parsed.protocol === 'https:' ? keepAliveHttpsAgent : undefined,
       headers: forward
     }, (proxyRes) => {
@@ -5193,7 +5367,19 @@ const TOKEN_PROTECTED_ROUTES = new Set([
   '/api/clear-offline-library',
   '/api/save-custom-lyrics',
   '/api/encode',
-  '/api/yandex-import'
+  '/api/yandex-import',
+  '/api/recommendations',
+  '/api/proxy-config',
+  '/api/proxy-test',
+  '/api/playlist-import',
+  '/api/track-cover',
+  '/api/albums/search',
+  '/api/albums/tracks',
+  '/api/album',
+  '/api/album-tracks',
+  '/api/hot',
+  '/api/lyrics-words',
+  '/api/audio-output-info'
 ]);
 
 function getServerToken() {
@@ -6635,7 +6821,7 @@ async function getSpotifyAccessToken(forceRefresh = false) {
       spotifyAuthError = '';
       if (typeof result.data.refresh_token === 'string' && result.data.refresh_token) {
         spotifyAuth.refreshToken = result.data.refresh_token;
-        if (!saveSpotifyAuth()) spotifyAuthError = 'Spotify login could not be saved securely; reconnect after restarting Riff.';
+        if (!saveSpotifyAuth()) spotifyAuthError = 'Spotify login could not be saved securely; reconnect after restarting Pulse.';
       }
       return spotifyAuth.token;
     })().finally(() => { spotifyRefreshPromise = null; });
@@ -7364,8 +7550,8 @@ function callLastFmApi(params, secret, method = 'POST') {
       hostname: 'ws.audioscrobbler.com',
       path: reqPath,
       method,
-      headers: isGet ? { 'User-Agent': 'Riff-Desktop-Player/43.0' } : {
-        'User-Agent': 'Riff-Desktop-Player/43.0',
+      headers: isGet ? { 'User-Agent': 'Pulse-Desktop-Player/1.0' } : {
+        'User-Agent': 'Pulse-Desktop-Player/1.0',
         'Content-Type': 'application/x-www-form-urlencoded',
         'Content-Length': Buffer.byteLength(bodyData)
       },
@@ -7481,7 +7667,50 @@ async function handleLastFmRoute(req, res, pathname) {
 const extraRouteHandlers = [];
 function registerRouteHandler(fn) { extraRouteHandlers.push(fn); }
 
-const server = http.createServer(async (req, res) => {
+// Last resort for a route that threw or rejected: answer 500 JSON (or drop a response that had
+// already started streaming) so the request never hangs, and keep the error in the log.
+function failRequest(res, err) {
+  try { logger.error('Unhandled route error', err); } catch (_) {}
+  if (res.writableEnded || res.destroyed) return;
+  if (res.headersSent) { res.destroy(); return; }
+  try {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: false, error: (err && err.message) || 'internal error' }));
+  } catch (_) {
+    res.destroy();
+  }
+}
+
+// Body handlers run in req 'end' callbacks, outside the route's promise: route their throws and
+// rejections to failRequest as well.
+function guardRequestCallbacks(req, res) {
+  const on = req.on.bind(req);
+  req.on = (event, listener) => {
+    if (event !== 'end' || typeof listener !== 'function') return on(event, listener);
+    // Keep `this` = req: Node's own 'end' listeners (clearIncoming) rely on it.
+    return on(event, function (...args) {
+      try {
+        const out = listener.apply(this, args);
+        if (out && typeof out.catch === 'function') out.catch((err) => failRequest(res, err));
+      } catch (err) {
+        failRequest(res, err);
+      }
+    });
+  };
+}
+
+const server = http.createServer((req, res) => {
+  guardRequestCallbacks(req, res);
+  let pending;
+  try {
+    pending = routeRequest(req, res);
+  } catch (err) {
+    return failRequest(res, err);
+  }
+  pending.catch((err) => failRequest(res, err));
+});
+
+async function routeRequest(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -7519,12 +7748,15 @@ const server = http.createServer(async (req, res) => {
     if (await hook(req, res, parsedUrl, tokenMatches)) return;
   }
 
-  if (pathname.startsWith('/api/lastfm/')) { handleLastFmRoute(req, res, pathname); return; }
-
-  if (TOKEN_PROTECTED_ROUTES.has(parsedUrl.pathname) && !tokenMatches(req.headers['x-riff-token'])) {
+  // Routes reached by fetch() carry X-Riff-Token (app.js patches fetch for /api/*). Media-element
+  // routes (audio/image proxy, local files, SSE) cannot send headers and stay Host/Origin-gated.
+  const needsToken = TOKEN_PROTECTED_ROUTES.has(pathname) || pathname.startsWith('/api/lastfm/');
+  if (needsToken && !tokenMatches(req.headers['x-riff-token'])) {
     res.writeHead(403, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ success: false, error: 'forbidden' }));
   }
+
+  if (pathname.startsWith('/api/lastfm/')) return handleLastFmRoute(req, res, pathname);
 
   if (parsedUrl.pathname === '/api/audio-output-info' && req.method === 'GET') {
     const info = await getSystemAudioOutputInfo();
@@ -7539,7 +7771,7 @@ const server = http.createServer(async (req, res) => {
       const payload = safeJsonParse(body, {});
       const texts = payload.texts || payload.lines || [];
       const targetLang = payload.targetLang || payload.to || 'en';
-      handleTranslate(req, res, texts, targetLang);
+      return handleTranslate(req, res, texts, targetLang);
     });
     return;
   }
@@ -7783,13 +8015,13 @@ const server = http.createServer(async (req, res) => {
     const errParam = parsedUrl.query.error;
     if (!spotifyAuth.state || !state || state !== spotifyAuth.state) {
       res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-      return res.end('<!DOCTYPE html><html><body><p>Invalid Spotify login session.</p></body></html>');
+      return res.end('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pulse Music</title></head><body><p>Invalid Spotify login session.</p></body></html>');
     }
     if (errParam || !code) {
       spotifyAuthError = errParam === 'access_denied' ? 'Spotify authorization was denied.' : 'Spotify login failed. Check the Client ID, allowed account and redirect URI.';
       spotifyAuth.state = '';
       res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-      return res.end('<!DOCTYPE html><html><body><p>Spotify login failed. Return to Riff for details.</p></body></html>');
+      return res.end('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pulse Music</title></head><body><p>Spotify login failed. Return to Pulse Music for details.</p></body></html>');
     }
     const redirectUri = getSpotifyRedirectUri();
     try {
@@ -7797,7 +8029,7 @@ const server = http.createServer(async (req, res) => {
       const tokenResult = await requestSpotifyToken({ grant_type: 'authorization_code', code, redirect_uri: redirectUri, client_id: spotifyAuth.clientId, code_verifier: spotifyAuth.verifier });
       if (spotifyAuth !== session) {
         res.writeHead(409, { 'Content-Type': 'text/html; charset=utf-8' });
-        return res.end('<!DOCTYPE html><html><body><p>Spotify login session changed. Return to Riff and try again.</p></body></html>');
+        return res.end('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pulse Music</title></head><body><p>Spotify login session changed. Return to Pulse Music and try again.</p></body></html>');
       }
       spotifyAuth.state = '';
       if (tokenResult.status >= 200 && tokenResult.status < 300 && typeof tokenResult.data?.access_token === 'string' && tokenResult.data.access_token) {
@@ -7805,20 +8037,20 @@ const server = http.createServer(async (req, res) => {
         spotifyAuth.refreshToken = typeof tokenResult.data.refresh_token === 'string' ? tokenResult.data.refresh_token : '';
         spotifyAuth.expiresAt = Date.now() + (Number.isFinite(tokenResult.data.expires_in) && tokenResult.data.expires_in > 0 ? tokenResult.data.expires_in : 3600) * 1000;
         if (!spotifyAuth.refreshToken) spotifyAuthError = 'Spotify did not provide a refresh token; reconnect when this session expires.';
-        else if (!saveSpotifyAuth()) spotifyAuthError = 'Spotify login could not be saved securely; reconnect after restarting Riff.';
+        else if (!saveSpotifyAuth()) spotifyAuthError = 'Spotify login could not be saved securely; reconnect after restarting Pulse.';
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        return res.end('<!DOCTYPE html><html><body><p>Riff is connected to Spotify. You can close this tab.</p></body></html>');
+        return res.end('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pulse Music</title></head><body><p>Pulse Music is connected to Spotify. You can close this tab.</p></body></html>');
       } else {
         const reason = tokenResult.data?.error_description || tokenResult.data?.error || `HTTP ${tokenResult.status}`;
         spotifyAuthError = `Spotify token exchange failed: ${reason}`;
         res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-        return res.end('<!DOCTYPE html><html><body><p>Spotify login failed. Return to Riff for details.</p></body></html>');
+        return res.end('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pulse Music</title></head><body><p>Spotify login failed. Return to Pulse Music for details.</p></body></html>');
       }
     } catch (err) {
       spotifyAuth.state = '';
       spotifyAuthError = `Could not reach Spotify: ${err.message}`;
       res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
-      return res.end('<!DOCTYPE html><html><body><p>Spotify login failed. Return to Riff for details.</p></body></html>');
+      return res.end('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pulse Music</title></head><body><p>Spotify login failed. Return to Pulse Music for details.</p></body></html>');
     }
   }
 
@@ -7861,13 +8093,18 @@ const server = http.createServer(async (req, res) => {
     req.on('data', chunk => { if (res.writableEnded) return; body += chunk; if (body.length > MAX_BODY_BYTES) { body = ''; req.removeAllListeners('data'); req.removeAllListeners('end'); res.writeHead(413, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, error: 'payload too large' })); req.resume(); } });
     req.on('end', () => {
       const payload = safeJsonParse(body, {});
-      handleVibeRecommendations(req, res, payload);
+      return handleVibeRecommendations(req, res, payload);
     });
     return;
   }
 
-  if (parsedUrl.pathname === '/api/trending') {
-    return handleTrending(req, res);
+  if (parsedUrl.pathname === '/api/recommendations' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { if (res.writableEnded) return; body += chunk; if (body.length > MAX_BODY_BYTES) { body = ''; req.removeAllListeners('data'); req.removeAllListeners('end'); res.writeHead(413, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, error: 'payload too large' })); req.resume(); } });
+    req.on('end', () => {
+      return handleRecommendations(req, res, safeJsonParse(body, {}));
+    });
+    return;
   }
 
   if (parsedUrl.pathname === '/api/artist') {
@@ -8086,6 +8323,13 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(400);
       return res.end();
     }
+    let targetHost = '';
+    try { targetHost = new URL(target).hostname; } catch (_) {}
+    if (isBlockedProxyHost(targetHost)) {
+      res.writeHead(403);
+      return res.end();
+    }
+    let blocked = false;
     const key = crypto.createHash('sha1').update(target).digest('hex');
     const cachePath = path.join(THUMBNAILS_DIR, `proxy-${key}.img`);
     let buffer = null;
@@ -8097,17 +8341,29 @@ const server = http.createServer(async (req, res) => {
     const hostDead = !!host && (thumbHostFails.get(host) || 0) > Date.now();
     if (!buffer && !hostDead) {
       try {
-        const r = await fetch(target, {
-          signal: AbortSignal.timeout(6000),
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36' }
-        });
-        if (!r.ok) throw new Error(String(r.status));
+        // Follow redirects by hand so every hop goes through the SSRF check.
+        let hop = target;
+        let r = null;
+        try { await assertPublicHttpUrl(hop); } catch (e) { blocked = true; throw e; }
+        for (let i = 0; i < 4; i++) {
+          r = await fetch(hop, {
+            redirect: 'manual',
+            signal: AbortSignal.timeout(6000),
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36' }
+          });
+          const loc = r.status >= 300 && r.status < 400 ? r.headers.get('location') : null;
+          if (!loc) break;
+          hop = new URL(loc, hop).toString();
+          try { await assertPublicHttpUrl(hop); } catch (e) { blocked = true; throw e; }
+          r = null;
+        }
+        if (!r || !r.ok) throw new Error(String(r ? r.status : 'redirect'));
         const data = Buffer.from(await r.arrayBuffer());
         if (data.length < 500) throw new Error('empty image');
         buffer = data;
         fs.promises.writeFile(cachePath, data).catch(() => {});
       } catch (e) {
-        if (host) thumbHostFails.set(host, Date.now() + 600000);
+        if (host && !blocked) thumbHostFails.set(host, Date.now() + 600000);
       }
     }
     if (!buffer && parsedUrl.query.artist && parsedUrl.query.title) {
@@ -8115,6 +8371,10 @@ const server = http.createServer(async (req, res) => {
       if (alt) {
         try { buffer = await fs.promises.readFile(alt); } catch (e) {}
       }
+    }
+    if (!buffer && blocked) {
+      res.writeHead(403);
+      return res.end();
     }
     if (!buffer) {
       res.writeHead(302, { Location: target });
@@ -8267,7 +8527,7 @@ const server = http.createServer(async (req, res) => {
 
   res.writeHead(404);
   res.end('Not found');
-});
+}
 
 function startServer(port = PORT) {
   if (server.listening) {

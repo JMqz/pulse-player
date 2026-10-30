@@ -1,4 +1,21 @@
-@import url('https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;600;700&display=swap');
+/* Google Sans (variable 400-700) bundled in assets/fonts so the UI renders the same offline.
+   Other scripts fall through to the system fonts in --font-family. */
+@font-face {
+  font-family: 'Google Sans';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: block;
+  src: url('../../assets/fonts/google-sans-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Google Sans';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: block;
+  src: url('../../assets/fonts/google-sans-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
 
 @property --md-sys-color-background { syntax: '<color>'; inherits: true; initial-value: #121214; }
 @property --md-sys-color-surface { syntax: '<color>'; inherits: true; initial-value: #121214; }
@@ -72,7 +89,7 @@
   --md-shape-corner-xl: 28px;
   --md-shape-corner-full: 9999px;
 
-  --font-family: 'Google Sans', 'Google Sans Text', system-ui, -apple-system, sans-serif;
+  --font-family: 'Google Sans', 'Segoe UI', Roboto, system-ui, -apple-system, sans-serif;
   --transition-fast: 150ms cubic-bezier(0.2, 0, 0, 1);
   --transition-normal: 200ms cubic-bezier(0.2, 0, 0, 1);
   --transition-m3: 350ms cubic-bezier(0.2, 0.0, 0, 1.0);
@@ -233,7 +250,7 @@ button:not(.btn-play-pause):not(.nav-item):not(.settings-nav-btn):active, .chip-
   transition: height 220ms cubic-bezier(0.2, 0, 0, 1), opacity 180ms ease;
 }
 .titlebar .app-logo { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: flex; align-items: center; justify-content: center; pointer-events: auto; cursor: pointer; -webkit-app-region: no-drag; }
-.titlebar-riff-icon { width: 20px; height: 20px; display: block; background-color: var(--md-sys-color-primary); -webkit-mask: url('../../assets/riff.svg') no-repeat center / contain; mask: url('../../assets/riff.svg') no-repeat center / contain; }
+.titlebar-riff-icon { width: 20px; height: 20px; display: block; background-color: var(--md-sys-color-primary); -webkit-mask: url('../../assets/pulse.svg') no-repeat center / contain; mask: url('../../assets/pulse.svg') no-repeat center / contain; }
 body.hide-titlebar::before {
   content: "";
   position: fixed;
@@ -719,6 +736,18 @@ body.is-window-resizing .platform-switch-container {
   pointer-events: none;
   transform: scale(1);
   transition: transform 150ms cubic-bezier(0.2, 0, 0, 1);
+}
+.nav-home-pulse {
+  position: relative;
+  background: color-mix(in srgb, var(--panel-bg) 93%, white 7%);
+}
+.nav-home-pulse::after {
+  content: '';
+  position: absolute;
+  inset: 24%;
+  background-color: var(--md-sys-color-on-surface);
+  -webkit-mask: url('../../assets/pulse.svg') no-repeat center / contain;
+  mask: url('../../assets/pulse.svg') no-repeat center / contain;
 }
 #nav-discover:active .nav-home-app-icon,
 #nav-discover.pressed .nav-home-app-icon {
@@ -3196,6 +3225,8 @@ body.perf .playbar .time-label { transition: none !important; }
   background: var(--md-sys-color-surface-container-highest);
   color: var(--md-sys-color-on-surface);
 }
+.btn-icon-pill.is-busy { cursor: progress; }
+.btn-icon-pill.is-busy svg { animation: m3Rotate 0.9s linear infinite; }
 
 .btn-pill-primary {
   background: var(--btn-primary-bg, var(--md-sys-color-primary));
@@ -9156,8 +9187,8 @@ body.hide-explicit-badges .explicit-badge {
   width: 46px;
   height: 46px;
   background-color: #36284E;
-  -webkit-mask: url('../../assets/riff.svg') no-repeat center / contain;
-  mask: url('../../assets/riff.svg') no-repeat center / contain;
+  -webkit-mask: url('../../assets/pulse.svg') no-repeat center / contain;
+  mask: url('../../assets/pulse.svg') no-repeat center / contain;
   transform: rotate(-45deg);
 }
 .riff-hero-floats {
@@ -9169,8 +9200,8 @@ body.hide-explicit-badges .explicit-badge {
 .riff-float-logo {
   position: absolute;
   background-color: #492E7D;
-  -webkit-mask: url('../../assets/riff.svg') no-repeat center / contain;
-  mask: url('../../assets/riff.svg') no-repeat center / contain;
+  -webkit-mask: url('../../assets/pulse.svg') no-repeat center / contain;
+  mask: url('../../assets/pulse.svg') no-repeat center / contain;
   opacity: 0.85;
 }
 .riff-float-logo.f1 {

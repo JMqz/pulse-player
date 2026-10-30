@@ -1,8 +1,0 @@
-<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <title>Pulse</title>
-  <path d="M32 200A32 32 0 0 1 96 200V312A32 32 0 0 1 32 312Z" fill="black"/>
-  <path d="M128 128A32 32 0 0 1 192 128V384A32 32 0 0 1 128 384Z" fill="black"/>
-  <path d="M224 64A32 32 0 0 1 288 64V448A32 32 0 0 1 224 448Z" fill="black"/>
-  <path d="M320 152A32 32 0 0 1 384 152V360A32 32 0 0 1 320 360Z" fill="black"/>
-  <path d="M416 216A32 32 0 0 1 480 216V296A32 32 0 0 1 416 296Z" fill="black"/>
-</svg>

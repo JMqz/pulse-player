@@ -202,7 +202,7 @@ async function installFfmpeg() {
     } else {
       await run('tar', ['-xf', archive, '-C', work]);
     }
-    for (const name of ['ffmpeg', 'ffprobe']) {
+    for (const name of ['ffmpeg']) {
       const exe = IS_WIN ? `${name}.exe` : name;
       const src = findFile(work, exe);
       if (!src) throw new Error(`${exe} not found inside the archive`);
@@ -271,6 +271,7 @@ async function updateYtDlpIfManaged() {
   } catch (e) {}
   try {
     await run(bin, ['-U'], 120000);
+    fs.mkdirSync(path.dirname(STAMP), { recursive: true });
     fs.writeFileSync(STAMP, String(Date.now()));
     return true;
   } catch (e) {

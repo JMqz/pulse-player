@@ -9,12 +9,14 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::paths;
 
 const PREFERRED_PORT: u16 = 38472;
 const MAX_RESTARTS: u32 = 3;
+/// A run that lasted this long counts as healthy: the restart budget starts over after it.
+const STABLE_RUN: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
@@ -105,7 +107,8 @@ fn supervise(root: &Path, port: u16, token: &str, shared: &Arc<(Mutex<Shared>, C
         std::env::join_paths(dirs).unwrap_or_default()
     };
 
-    for attempt in 0..=MAX_RESTARTS {
+    let mut restarts: u32 = 0;
+    for attempt in 0u32.. {
         let mut cmd = Command::new(&runtime);
         if !electron {
             cmd.arg("--max-old-space-size=96");
@@ -136,6 +139,7 @@ fn supervise(root: &Path, port: u16, token: &str, shared: &Arc<(Mutex<Shared>, C
             Err(e) => return fail(format!("failed to spawn {}: {e}", runtime.display())),
         };
         job::assign(&child);
+        let started = Instant::now();
 
         let log = Arc::new(Mutex::new(
             std::fs::OpenOptions::new().create(true).append(true).open(&log_path).ok(),
@@ -185,7 +189,14 @@ fn supervise(root: &Path, port: u16, token: &str, shared: &Arc<(Mutex<Shared>, C
             return;
         }
         write_log("--- media server exited");
-        if s.phase == Phase::Ready && attempt < MAX_RESTARTS {
+        if started.elapsed() >= STABLE_RUN {
+            restarts = 0;
+        }
+        if restarts >= MAX_RESTARTS {
+            break;
+        }
+        restarts += 1;
+        if s.phase == Phase::Ready {
             s.phase = Phase::Starting;
         }
         drop(s);

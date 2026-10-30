@@ -92,6 +92,9 @@ fn multi_instance_allowed() -> bool {
 
 pub fn run() {
     let root = paths::app_root();
+    // Before anything reads %LOCALAPPDATA%\Pulse (startup.json, the Node server, the cookie file).
+    paths::migrate_legacy_media_data();
+    google::scrub_cookie_file();
     let server = Arc::new(server::MediaServer::new());
     // Start Node right away so it boots while the webview initialises.
     server.start(root.clone());

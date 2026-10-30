@@ -3,7 +3,7 @@
 ; Per-user install (no admin): %LOCALAPPDATA%\Programs\Pulse
 
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "1.1.0"
 #endif
 #ifndef StageDir
   #define StageDir "..\release\stage\Pulse"
@@ -64,6 +64,8 @@ Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs c
 ; Drop UI/server files from a previous version so removed files don't linger.
 Type: filesandordirs; Name: "{app}\src"
 Type: filesandordirs; Name: "{app}\assets"
+; Shipped by 1.0.0, no longer needed (local metadata falls back to ffmpeg).
+Type: files; Name: "{app}\bin\ffprobe.exe"
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"

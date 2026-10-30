@@ -2,7 +2,7 @@
 //!
 //! yt-dlp's `--cookies-from-browser` can no longer read Chromium cookies on Windows (app-bound
 //! encryption), so Pulse signs in inside its own WebView2 window instead and writes the session
-//! as a Netscape cookie file (`%LOCALAPPDATA%\Riff\yt-cookies.txt`), the file the Node server and
+//! as a Netscape cookie file (`%LOCALAPPDATA%\Pulse\yt-cookies.txt`, only the YouTube auth cookies), the file the Node server and
 //! yt-dlp already use.
 //!
 //! The login window uses its own WebView2 profile (`%APPDATA%\Pulse\google-login`): it runs
@@ -21,6 +21,15 @@ const LOGIN_URL: &str =
     "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2F";
 /// Cookies that only exist for a signed-in session.
 const AUTH_COOKIES: &[&str] = &["SAPISID", "__Secure-3PAPISID", "__Secure-1PAPISID", "LOGIN_INFO"];
+/// The only cookies written to yt-cookies.txt: what YouTube/yt-dlp need to authenticate (plus the
+/// `*PSIDTS`/`*SIDCC` companions Google rotates with them). Everything else the Google account sets
+/// for its other services stays in the sign-in profile.
+const EXPORT_COOKIES: &[&str] = &[
+    "LOGIN_INFO", "SAPISID", "APISID", "HSID", "SSID", "SID",
+    "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PAPISID", "__Secure-3PAPISID",
+    "__Secure-1PSIDTS", "__Secure-3PSIDTS", "__Secure-1PSIDCC", "__Secure-3PSIDCC", "SIDCC",
+    "PREF", "YSC", "VISITOR_INFO1_LIVE", "VISITOR_PRIVACY_METADATA",
+];
 const TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// An existing session usually lands on youtube.com within this time; only then show the window.
 const SILENT_GRACE: Duration = Duration::from_secs(4);
@@ -50,13 +59,44 @@ fn is_signed_in(cookies: &[Cookie<'static>]) -> bool {
     cookies.iter().any(|c| AUTH_COOKIES.contains(&c.name()) && !c.value().is_empty())
 }
 
+fn exportable(domain: &str, name: &str) -> bool {
+    let domain = domain.trim_start_matches('.').to_ascii_lowercase();
+    let on_youtube = ["youtube.com", "google.com"]
+        .iter()
+        .any(|d| domain == *d || domain.ends_with(&format!(".{d}")));
+    on_youtube && EXPORT_COOKIES.contains(&name)
+}
+
+/// Drops anything outside `EXPORT_COOKIES` from a cookie file written by an older Pulse/Riff,
+/// so upgrading does not keep the whole Google account jar on disk until the next sign-in.
+pub fn scrub_cookie_file() {
+    let path = cookies_file();
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let mut changed = false;
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|line| {
+            let raw = line.strip_prefix("#HttpOnly_").unwrap_or(line);
+            if raw.trim().is_empty() || raw.starts_with('#') {
+                return true;
+            }
+            let f: Vec<&str> = raw.split('\t').collect();
+            let keep = f.len() >= 7 && exportable(f[0], f[5]);
+            changed |= !keep;
+            keep
+        })
+        .collect();
+    if changed {
+        let _ = paths::write_atomic(&path, (kept.join("\n") + "\n").as_bytes());
+    }
+}
+
 /// Netscape cookie file (what yt-dlp's --cookies and src/host/host-routes.js read).
 fn netscape(cookies: &[Cookie<'static>]) -> String {
     let mut out = String::from("# Netscape HTTP Cookie File\n# Written by Pulse (in-app YouTube sign-in).\n\n");
     for c in cookies {
         let domain = c.domain().unwrap_or("").trim_start_matches('.').to_ascii_lowercase();
-        let relevant = domain.split('.').any(|l| l == "youtube" || l == "google");
-        if domain.is_empty() || !relevant || c.name().contains(['\t', '\n']) || c.value().contains(['\t', '\n']) {
+        if !exportable(&domain, c.name()) || c.value().contains(['\t', '\n']) {
             continue;
         }
         // `__Host-` cookies must stay host-only; everything else Google sets is a domain cookie.

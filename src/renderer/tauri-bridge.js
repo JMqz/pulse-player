@@ -25,6 +25,18 @@
     }
   };
 
+  // ---------- updates (GitHub releases of the Pulse repo) ----------
+  const PULSE_RELEASES_API = 'https://api.github.com/repos/JMqz/pulse-player/releases/latest';
+  const PULSE_RELEASES_PAGE = 'https://github.com/JMqz/pulse-player/releases/latest';
+  function isNewerVersion(latest, current) {
+    const a = String(latest).split('.').map((n) => parseInt(n, 10) || 0);
+    const b = String(current).split('.').map((n) => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0);
+    }
+    return false;
+  }
+
   // ---------- Node host calls ----------
   let serverReady = null;
   const waitServer = () => serverReady || (serverReady = invoke('server_wait').catch((e) => { serverReady = null; throw e; }));
@@ -143,6 +155,31 @@
   let mediaKeysActive = false;
   const syncMediaKeys = () => fire('set_media_keys', { enabled: mediaKeysWanted && mediaKeysActive });
 
+  // ---------- debounced storage saves ----------
+  const STORAGE_DEBOUNCE_MS = 200;
+  const STORAGE_MAX_WAIT_MS = 1000;
+  let storageTimer = 0;
+  let storageDirty = false;
+  let storageFirstDirty = 0;
+  function flushStorage() {
+    clearTimeout(storageTimer);
+    storageFirstDirty = 0;
+    if (!storageDirty || !window.__pulseLastStorage) return;
+    storageDirty = false;
+    fetch('/__pulse/storage?debounce=1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(window.__pulseLastStorage), keepalive: false }).catch(noop);
+  }
+  // Going to the tray/minimised or unloading: don't leave a change waiting in the timer.
+  const flushStorageNow = () => {
+    if (!storageDirty) return;
+    clearTimeout(storageTimer);
+    storageDirty = false;
+    storageFirstDirty = 0;
+    try { syncRequest('POST', '/__pulse/storage', JSON.stringify(window.__pulseLastStorage)); } catch (_) {}
+  };
+  on('window-visibility', (visible) => { if (!visible) flushStorageNow(); });
+  window.addEventListener('pagehide', flushStorageNow);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushStorageNow(); });
+
   const noop = () => {};
   const api = {
     serverToken: token,
@@ -167,11 +204,33 @@
     setAppProxy: (proxyUrl) => invoke('set_app_proxy', { proxy: String(proxyUrl || '') }),
     getGpuCompositing: async () => 'enabled',
     getAppVersion: async () => boot.version || '',
-    checkForUpdates: async () => ({ ok: true, disabled: true }),
+    // No in-place installer: a newer GitHub release is announced and the sheet opens its page.
+    checkForUpdates: async () => {
+      try {
+        const res = await fetch(PULSE_RELEASES_API, { headers: { Accept: 'application/vnd.github+json' }, cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const rel = await res.json();
+        const version = String(rel.tag_name || '').replace(/^v/i, '');
+        if (version && isNewerVersion(version, boot.version || '0')) {
+          window.__pulseEmit('update-available', {
+            version, releaseNotes: rel.body || '', publishedAt: rel.published_at || '',
+            htmlUrl: rel.html_url || PULSE_RELEASES_PAGE, canInstall: false
+          });
+        } else {
+          window.__pulseEmit('update-not-available', { version });
+        }
+        return { ok: true };
+      } catch (e) {
+        window.__pulseEmit('update-error', { message: e && e.message ? e.message : String(e) });
+        return { ok: true, error: true };
+      }
+    },
     updateAction: noop,
     installUpdateNow: noop,
-    onUpdateAvailable: noop, onUpdateDownloaded: noop, onUpdateProgress: noop,
-    onUpdateReady: noop, onUpdateError: noop, onUpdateNotAvailable: noop,
+    onUpdateAvailable: (cb) => on('update-available', cb),
+    onUpdateNotAvailable: (cb) => on('update-not-available', cb),
+    onUpdateError: (cb) => on('update-error', cb),
+    onUpdateDownloaded: noop, onUpdateProgress: noop, onUpdateReady: noop,
 
     openExternal: (u) => fire('open_external', { url: String(u || '') }),
     openLogsFolder: async () => fire('open_path', { path: await host('logs-dir') }),
@@ -252,12 +311,12 @@
     },
     showPlaylistContextMenu: () => invoke('playlist_context_menu'),
     accountExport: async (payload) => {
-      const p = await saveDialog({ title: 'Export Pulse account', defaultName: 'riff-account.rfacc', filters: [{ name: 'Riff Account (.rfacc)', extensions: ['rfacc'] }] });
+      const p = await saveDialog({ title: 'Export Pulse account', defaultName: 'pulse-account.pulseacc', filters: [{ name: 'Pulse Account (.pulseacc)', extensions: ['pulseacc'] }] });
       if (!p) return { canceled: true };
       return host('account-export', { path: p, payload: payload || {} }).catch((e) => ({ success: false, error: e.message }));
     },
     accountImport: async () => {
-      const r = await openDialog({ title: 'Import Pulse account', filters: [{ name: 'Riff Account (.rfacc)', extensions: ['rfacc'] }] });
+      const r = await openDialog({ title: 'Import Pulse account', filters: [{ name: 'Pulse Account (.pulseacc, .rfacc)', extensions: ['pulseacc', 'rfacc'] }] });
       if (!r || !r.length) return { canceled: true };
       return host('account-import', { path: r[0] }).catch((e) => ({ success: false, error: e.message }));
     },
@@ -266,12 +325,21 @@
       const txt = syncRequest('GET', '/__pulse/storage');
       try { return txt ? JSON.parse(txt) : null; } catch (_) { return null; }
     },
+    // Bursts of setItem (queue edits, settings sliders, playback state) coalesce into one
+    // JSON.stringify + request: sent 200 ms after the last change, at most 1 s after the first.
     storageSaveBatch: (data) => {
       if (!data || typeof data !== 'object') return;
       window.__pulseLastStorage = data;
-      fetch('/__pulse/storage?debounce=1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data), keepalive: false }).catch(noop);
+      storageDirty = true;
+      clearTimeout(storageTimer);
+      if (!storageFirstDirty) storageFirstDirty = Date.now();
+      const wait = Math.max(0, Math.min(STORAGE_DEBOUNCE_MS, storageFirstDirty + STORAGE_MAX_WAIT_MS - Date.now()));
+      storageTimer = setTimeout(flushStorage, wait);
     },
     storageSaveSync: (data) => {
+      clearTimeout(storageTimer);
+      storageDirty = false;
+      storageFirstDirty = 0;
       if (data && typeof data === 'object') syncRequest('POST', '/__pulse/storage', JSON.stringify(data));
       return true;
     },

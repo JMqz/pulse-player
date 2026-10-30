@@ -4,17 +4,64 @@ const path = require('path');
 
 const IS_WIN = process.platform === 'win32';
 
+const LOCAL_APP_DATA = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+// Windows: %LOCALAPPDATA%\Pulse holds data, cache and config; Electron Riff's %LOCALAPPDATA%\Riff is
+// merged into it once (see migrateLegacyDataDir) and afterwards only searched for tools.
+const LEGACY_DATA_DIR = IS_WIN
+  ? path.join(LOCAL_APP_DATA, 'Riff')
+  : process.platform === 'darwin'
+  ? path.join(os.homedir(), 'Library', 'Application Support', 'Riff')
+  : null;
+
 const DEFAULT_DATA_DIR = IS_WIN
-  ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Riff')
+  ? path.join(LOCAL_APP_DATA, 'Pulse')
   : process.platform === 'darwin'
   ? path.join(os.homedir(), 'Library', 'Application Support', 'Riff')
   : path.join(os.homedir(), '.cache', 'devsize');
 
 const CONFIG_DIR = IS_WIN
-  ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Riff')
+  ? path.join(LOCAL_APP_DATA, 'Pulse')
   : process.platform === 'darwin'
   ? path.join(os.homedir(), 'Library', 'Application Support', 'Riff')
   : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'devsize');
+
+// Same rules and marker as src-tauri/src/paths.rs (which normally runs first, before this server
+// starts): non-destructive merge, existing Pulse files win, big media files are hard-linked.
+const MIGRATION_MARKER = '.migrated-from-riff';
+const MIGRATION_SKIP = new Set(['bin', 'logs', 'plugins', MIGRATION_MARKER]);
+function migrateLegacyDataDir() {
+  if (!IS_WIN || !LEGACY_DATA_DIR) return;
+  const marker = path.join(DEFAULT_DATA_DIR, MIGRATION_MARKER);
+  if (fs.existsSync(marker)) return;
+  let ok = true;
+  const merge = (from, to, top) => {
+    let entries;
+    try { entries = fs.readdirSync(from, { withFileTypes: true }); } catch (_) { ok = false; return; }
+    for (const e of entries) {
+      if (top && MIGRATION_SKIP.has(e.name.toLowerCase())) continue;
+      const src = path.join(from, e.name);
+      const dst = path.join(to, e.name);
+      try {
+        if (e.isDirectory()) {
+          fs.mkdirSync(dst, { recursive: true });
+          merge(src, dst, false);
+        } else if (e.isFile() && !fs.existsSync(dst)) {
+          let linked = false;
+          if (fs.statSync(src).size > 1024 * 1024) { try { fs.linkSync(src, dst); linked = true; } catch (_) {} }
+          if (!linked) fs.copyFileSync(src, dst, fs.constants.COPYFILE_EXCL);
+        }
+      } catch (_) { ok = false; }
+    }
+  };
+  try {
+    if (fs.existsSync(LEGACY_DATA_DIR)) {
+      fs.mkdirSync(DEFAULT_DATA_DIR, { recursive: true });
+      merge(LEGACY_DATA_DIR, DEFAULT_DATA_DIR, true);
+    }
+    if (ok) { fs.mkdirSync(DEFAULT_DATA_DIR, { recursive: true }); fs.writeFileSync(marker, '1'); }
+  } catch (_) {}
+}
+migrateLegacyDataDir();
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 
 function readConfig() {
@@ -75,15 +122,16 @@ const LIBRARY_DIR = path.join(DATA_DIR, 'library');
 const LIBRARY_PATH = path.join(DATA_DIR, 'library.json');
 const BIN_DIR = path.join(DATA_DIR, 'bin');
 // Tool lookup order: <app root>\bin (bundled by the installer), %LOCALAPPDATA%\Pulse\bin (auto-download
-// target), then the legacy Riff bin folder. PULSE_ROOT / PULSE_BIN_DIR come from the native host.
+// target), the data folder's bin, then the legacy %LOCALAPPDATA%\Riff\bin. PULSE_ROOT / PULSE_BIN_DIR come from the native host.
 const APP_ROOT = process.env.PULSE_ROOT ? path.resolve(process.env.PULSE_ROOT) : path.resolve(__dirname, '../..');
 const APP_BIN_DIR = path.join(APP_ROOT, 'bin');
 const PULSE_BIN_DIR = process.env.PULSE_BIN_DIR
   ? path.resolve(process.env.PULSE_BIN_DIR)
   : IS_WIN
-  ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Pulse', 'bin')
+  ? path.join(LOCAL_APP_DATA, 'Pulse', 'bin')
   : BIN_DIR;
-const TOOL_DIRS = [...new Set([APP_BIN_DIR, PULSE_BIN_DIR, BIN_DIR])];
+const LEGACY_BIN_DIR = LEGACY_DATA_DIR ? path.join(LEGACY_DATA_DIR, 'bin') : BIN_DIR;
+const TOOL_DIRS = [...new Set([APP_BIN_DIR, PULSE_BIN_DIR, BIN_DIR, LEGACY_BIN_DIR])];
 const TUTORIAL_MARKER = IS_WIN ? 'C:\\Riff\\.rifftutorial' : path.join(os.homedir(), '.rifftutorial');
 const TUTORIAL_MARKER_FALLBACK = path.join(DATA_DIR, '.rifftutorial');
 const STARTUP_PATH = path.join(DATA_DIR, 'startup.json');

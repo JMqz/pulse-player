@@ -133,6 +133,18 @@ try { window.electronAPI.storageSaveSync(diskMap); } catch (_) {}
   } catch (e) {}
 })();
 
+// Image fallbacks without inline onerror="" (blocked by the page CSP): templates mark images with
+// data-hide-on-error or data-fallback-src and this one capture-phase listener applies them.
+document.addEventListener('error', (e) => {
+  const img = e.target;
+  if (!(img instanceof HTMLImageElement)) return;
+  if (img.hasAttribute('data-hide-on-error')) {
+    img.style.display = 'none';
+  } else if (img.dataset.fallbackSrc && img.getAttribute('src') !== img.dataset.fallbackSrc) {
+    img.src = img.dataset.fallbackSrc;
+  }
+}, true);
+
 (() => {
   let lastErrLogReset = Date.now();
   let errLogCount = 0;
@@ -190,7 +202,7 @@ function ensureHls() {
   };
   const safety = setTimeout(finish, 1850);
   try {
-    const res = await fetch('../../assets/riff.svg');
+    const res = await fetch('../../assets/pulse.svg');
     const svgText = await res.text();
     host.innerHTML = svgText;
     const svg = host.querySelector('svg');
@@ -924,7 +936,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const rawArtist = (typeof current.artist === 'string' ? current.artist.trim() : '');
       const title = rawTitle || 'Unknown track';
       const artist = rawArtist || 'Unknown artist';
-      const album = current.album || 'Riff';
+      const album = current.album || 'Pulse';
       const thumb = (typeof getTrackThumbUrl === 'function' ? getTrackThumbUrl(current) : '') || current.thumbnail || current.cover || '';
       const artwork = getMediaArtwork(thumb);
       navigator.mediaSession.metadata = new MediaMetadata({
@@ -8771,7 +8783,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const sub = [album.type || 'Album', album.artist || ''].filter(Boolean).join(' · ');
       return `
         <div class="search-album-card" role="button" tabindex="0">
-          ${album.cover ? `<img class="search-album-cover" src="${escapeHtml(album.cover)}" alt="${escapeHtml(album.title || '')}" loading="lazy" onerror="this.style.display='none'" />` : '<div class="search-album-cover" style="display:flex;align-items:center;justify-content:center;background:var(--md-sys-color-surface-container-high);"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--md-sys-color-outline);"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg></div>'}
+          ${album.cover ? `<img class="search-album-cover" src="${escapeHtml(album.cover)}" alt="${escapeHtml(album.title || '')}" loading="lazy" data-hide-on-error />` : '<div class="search-album-cover" style="display:flex;align-items:center;justify-content:center;background:var(--md-sys-color-surface-container-high);"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--md-sys-color-outline);"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg></div>'}
           <div class="search-album-info">
             <span class="search-album-title" title="${escapeHtml(album.title || '')}">${escapeHtml(album.title || '')}</span>
             <span class="search-album-sub" title="${escapeHtml(sub)}">${escapeHtml(sub)}</span>
@@ -9138,7 +9150,7 @@ document.addEventListener('DOMContentLoaded', async () => {
               const sub = album.year ? `${escapeHtml(album.artist)} · ${escapeHtml(album.year)}` : escapeHtml(album.artist || '');
               return `
                 <div class="search-album-card" role="button" tabindex="0">
-                  ${album.cover ? `<img class="search-album-cover" src="${escapeHtml(album.cover)}" alt="${escapeHtml(album.title)}" loading="lazy" onerror="this.style.display='none'" />` : '<div class="search-album-cover" style="display:flex;align-items:center;justify-content:center;background:var(--md-sys-color-surface-container-high);"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--md-sys-color-outline);"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg></div>'}
+                  ${album.cover ? `<img class="search-album-cover" src="${escapeHtml(album.cover)}" alt="${escapeHtml(album.title)}" loading="lazy" data-hide-on-error />` : '<div class="search-album-cover" style="display:flex;align-items:center;justify-content:center;background:var(--md-sys-color-surface-container-high);"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--md-sys-color-outline);"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg></div>'}
                   <div class="search-album-info">
                     <span class="search-album-title" title="${escapeHtml(album.title)}">${escapeHtml(album.title)}</span>
                     <span class="search-album-sub" title="${sub}">${sub}</span>
@@ -9858,7 +9870,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       items.push({
         id: 'remove-local',
         danger: true,
-        label: 'Remove from Riff',
+        label: 'Remove from Pulse',
         icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>',
         action: () => {
           removeTracksFromLocalLibrary([track]);
@@ -10245,7 +10257,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       ${!isAlbum ? `
       <div class="track-row-thumb-wrap">
         <svg class="track-row-fallback-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>
-        ${rowThumb ? `<img class="track-row-thumb" src="${escapeHtml(rowThumb)}" alt="" onerror="this.style.display='none'">` : ''}
+        ${rowThumb ? `<img class="track-row-thumb" src="${escapeHtml(rowThumb)}" alt="" data-hide-on-error>` : ''}
       </div>` : ''}
       <div class="track-row-info">
       <span class="track-row-title">${escapeHtml(track.title || 'untitled')}</span>
@@ -10798,7 +10810,7 @@ function renderClickableArtists(container, rawArtist) {
 
     const circleHtml = `
       <div class="fav-artist-circle">
-        <img class="fav-artist-img" src="${escapeHtml(avatar)}" alt="${escapeHtml(artistObj.name)}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'152\\' height=\\'152\\' fill=\\'%23333\\'><circle cx=\\'76\\' cy=\\'76\\' r=\\'76\\' fill=\\'%232a2a2a\\'/></svg>'">
+        <img class="fav-artist-img" src="${escapeHtml(avatar)}" alt="${escapeHtml(artistObj.name)}" data-fallback-src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='152' height='152' fill='%23333'><circle cx='76' cy='76' r='76' fill='%232a2a2a'/></svg>">
         <div class="fav-artist-plays"><svg viewBox="0 0 24 24"><polygon points="6 4 20 12 6 20 6 4"/></svg><span>${escapeHtml(playText)}</span></div>
         <div class="fav-artist-hover">
           <button type="button" class="fav-artist-action-btn primary btn-play-fav" title="Play ${escapeHtml(artistObj.name)}">
@@ -11188,7 +11200,7 @@ function renderClickableArtists(container, rawArtist) {
           const sub = alb.year ? `${escapeHtml(alb.artist || cleanName)} · ${escapeHtml(alb.year)}` : escapeHtml(alb.artist || cleanName);
           return `
             <div class="search-album-card" role="button" tabindex="0">
-              ${alb.cover ? `<img class="search-album-cover" src="${escapeHtml(alb.cover)}" alt="${escapeHtml(alb.title || '')}" loading="lazy" onerror="this.style.display='none'" />` : '<div class="search-album-cover" style="display:flex;align-items:center;justify-content:center;background:var(--md-sys-color-surface-container-high);"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--md-sys-color-outline);"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg></div>'}
+              ${alb.cover ? `<img class="search-album-cover" src="${escapeHtml(alb.cover)}" alt="${escapeHtml(alb.title || '')}" loading="lazy" data-hide-on-error />` : '<div class="search-album-cover" style="display:flex;align-items:center;justify-content:center;background:var(--md-sys-color-surface-container-high);"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--md-sys-color-outline);"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg></div>'}
               <div class="search-album-info">
                 <span class="search-album-title" title="${escapeHtml(alb.title || '')}">${escapeHtml(alb.title || '')}</span>
                 <span class="search-album-sub" title="${sub}">${sub}</span>
@@ -11684,7 +11696,7 @@ function renderClickableArtists(container, rawArtist) {
           const sub = alb.artist ? `${escapeHtml(alb.artist)} · ${count} track${count === 1 ? '' : 's'}` : `${count} track${count === 1 ? '' : 's'}`;
           return `
             <div class="search-album-card" role="button" tabindex="0" data-album="${escapeHtml(alb.name)}">
-              ${alb.cover ? `<img class="search-album-cover" src="${escapeHtml(alb.cover)}" alt="${escapeHtml(alb.name)}" loading="lazy" onerror="this.style.display='none'" />` : '<div class="search-album-cover" style="display:flex;align-items:center;justify-content:center;background:var(--md-sys-color-surface-container-high);"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--md-sys-color-outline);"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg></div>'}
+              ${alb.cover ? `<img class="search-album-cover" src="${escapeHtml(alb.cover)}" alt="${escapeHtml(alb.name)}" loading="lazy" data-hide-on-error />` : '<div class="search-album-cover" style="display:flex;align-items:center;justify-content:center;background:var(--md-sys-color-surface-container-high);"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--md-sys-color-outline);"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg></div>'}
               <div class="search-album-info">
                 <span class="search-album-title" title="${escapeHtml(alb.name)}">${escapeHtml(alb.name)}</span>
                 <span class="search-album-sub" title="${sub}">${sub}</span>
@@ -15387,68 +15399,9 @@ function bindCoverHoldZoom(wrapEl) {
     });
   }
 
-  const RIFF_APP_ICONS = [
-    { id: '01-default.svg', label: 'Default' },
-    { id: '02-editor.svg', label: 'Editor' },
-    { id: '03-orbit.svg', label: 'Orbit' },
-    { id: '04-vinyl.svg', label: 'Vinyl' },
-    { id: '06-cosmos.svg', label: 'Cosmos' },
-    { id: '07-aurora.svg', label: 'Aurora' },
-    { id: '08-sunset.svg', label: 'Sunset' },
-    { id: '09-amethyst.svg', label: 'Amethyst' },
-    { id: '10-y2k-disc.svg', label: 'Y2K Disc' },
-    { id: '11-cassette.svg', label: 'Cassette' },
-    { id: '12-invincible.svg', label: 'Invincible' },
-    { id: '13-blueprint.svg', label: 'Blueprint' },
-    { id: '14-galaxy.svg', label: 'Galaxy' },
-    { id: '15-opal.svg', label: 'Opal' },
-    { id: '16-chrome.svg', label: 'Chrome' },
-    { id: '17-eclipse.svg', label: 'Eclipse' },
-    { id: '18-nebula.svg', label: 'Nebula' },
-    { id: '19-horizon.svg', label: 'Horizon' }
-  ];
-  function resolveAppIconSrc(val) {
-    if (!val) return '../../assets/02-editor.svg';
-    if (val.startsWith('file:') || val.startsWith('http') || val.startsWith('data:')) return val;
-    return '../../assets/' + val.replace(/^.*assets\//, '');
-  }
-  function applyHomeAppIcon(val) {
-    const chosen = val || localStorage.getItem('riff_app_icon') || '02-editor.svg';
-    localStorage.setItem('riff_app_icon', chosen);
-    const homeImg = document.getElementById('nav-home-app-icon');
-    if (homeImg) homeImg.src = resolveAppIconSrc(chosen);
-    const grid = document.getElementById('app-icon-picker-grid');
-    if (grid) {
-      grid.querySelectorAll('.app-icon-option').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.icon === chosen);
-      });
-    }
-  }
-  function initAppIconPicker() {
-    const grid = document.getElementById('app-icon-picker-grid');
-    const saved = localStorage.getItem('riff_app_icon') || '02-editor.svg';
-    if (grid) {
-      grid.innerHTML = '';
-      RIFF_APP_ICONS.forEach(item => {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'app-icon-option' + (saved === item.id ? ' active' : '');
-        btn.dataset.icon = item.id;
-        btn.innerHTML = '<div class="app-icon-option-box"><img src="' + resolveAppIconSrc(item.id) + '" alt="' + item.label + '" draggable="false" /></div><span class="app-icon-option-label">' + item.label + '</span>';
-        btn.addEventListener('click', () => applyHomeAppIcon(item.id));
-        grid.appendChild(btn);
-      });
-    }
-    const btnCustom = document.getElementById('btn-pick-custom-home-icon');
-    if (btnCustom && window.electronAPI && window.electronAPI.pickMedia) {
-      btnCustom.addEventListener('click', async () => {
-        const url = await window.electronAPI.pickMedia();
-        if (url) applyHomeAppIcon(url);
-      });
-    }
-    applyHomeAppIcon(saved);
-  }
-  initAppIconPicker();
+  // Home button uses the fixed Pulse mark (styles.css .nav-home-pulse); the
+  // legacy icon picker was removed, so drop its stale preference.
+  try { localStorage.removeItem('riff_app_icon'); } catch (_) {}
 
   function watchSliderValue(input, onChange) {
     const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
@@ -16319,7 +16272,8 @@ function bindCoverHoldZoom(wrapEl) {
   }
 
   function showSettingsCategory(cat) {
-    if (cat === 'appearance' || cat === 'overview' || !cat) cat = 'home';
+    // 'plugins' is hidden in Pulse (no plugin host); a saved choice falls back to the home pane.
+    if (cat === 'appearance' || cat === 'overview' || cat === 'plugins' || !cat) cat = 'home';
     document.querySelectorAll('#view-settings .setting-item').forEach(i => i.classList.remove('hidden'));
     document.querySelectorAll('#view-settings .settings-section').forEach(s => s.classList.toggle('cat-hidden', s.dataset.cat !== cat));
     document.querySelectorAll('#settings-nav .settings-nav-btn').forEach(b => b.classList.toggle('active', b.dataset.cat === cat));
@@ -16617,7 +16571,7 @@ function bindCoverHoldZoom(wrapEl) {
     document.querySelectorAll(`style[data-plugin="${p.file}"]`).forEach((n) => n.remove());
     const hadStop = !!(entry && entry.stop);
     loadedPlugins.delete(p.file);
-    if (!silent && !hadStop) showToast(`Restart Riff to fully unload "${p.name}"`, 'info');
+    if (!silent && !hadStop) showToast(`Restart Pulse to fully unload "${p.name}"`, 'info');
   }
   let pluginsCache = [];
   function renderPluginCards() {
@@ -16887,7 +16841,7 @@ function bindCoverHoldZoom(wrapEl) {
       const btnConfirm = document.getElementById('btn-confirm-spotify-import');
       if (btnConfirm) btnConfirm.click();
     }
-    showToast('Welcome to Riff!', 'info');
+    showToast('Welcome to Pulse!', 'info');
   }
   if (window.electronAPI && window.electronAPI.onWelcomeResult) window.electronAPI.onWelcomeResult((d) => applyWelcomeResult(d));
 
@@ -17672,13 +17626,10 @@ function bindCoverHoldZoom(wrapEl) {
     }
 
     const btn = $('btn-check-updates');
-    // Pulse: auto-updater removed — hide the button and skip all update wiring.
-    if (btn) btn.style.display = 'none';
-    return;
     const originalBtnHtml = btn ? btn.innerHTML : 'Check for updates';
     let manualUpdateCheck = false;
     let checkTimeoutId = null;
-    let fallbackReleaseUrl = 'https://github.com/rootscripts/riff/releases/latest';
+    let fallbackReleaseUrl = 'https://github.com/JMqz/pulse-player/releases/latest';
     let canNativeInstall = false;
 
     let latestUpdateInfo = null;
@@ -17769,6 +17720,11 @@ function bindCoverHoldZoom(wrapEl) {
       modal.classList.remove('hidden');
     }
 
+    function openReleasePage(url) {
+      if (api && api.openExternal) api.openExternal(url);
+      else window.open(url, '_blank');
+    }
+
     function restoreButton() {
       manualUpdateCheck = false;
       if (checkTimeoutId) {
@@ -17800,13 +17756,13 @@ function bindCoverHoldZoom(wrapEl) {
           showToast('Could not check for updates', 'error');
           return;
         }
-        const res = await fetch('https://api.github.com/repos/rootscripts/riff/releases/latest', {
-          headers: { 'User-Agent': 'Riff-Player' }
+        const res = await fetch('https://api.github.com/repos/JMqz/pulse-player/releases/latest', {
+          headers: { Accept: 'application/vnd.github+json' }
         });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const json = await res.json();
         const latestVersion = (json.tag_name || '').replace(/^v/i, '');
-        fallbackReleaseUrl = json.html_url || 'https://github.com/rootscripts/riff/releases/latest';
+        fallbackReleaseUrl = json.html_url || 'https://github.com/JMqz/pulse-player/releases/latest';
         if (isNewerVersion(latestVersion, currentAppVersion)) {
           latestUpdateInfo = {
             version: latestVersion,
@@ -17819,7 +17775,7 @@ function bindCoverHoldZoom(wrapEl) {
           restoreButton();
         } else {
           restoreButton();
-          showToast('You are using the latest version of Riff!', 'success');
+          showToast('You are using the latest version of Pulse!', 'success');
         }
       } catch (err) {
         restoreButton();
@@ -17869,8 +17825,8 @@ function bindCoverHoldZoom(wrapEl) {
 
         if (!hasImg || !hasPublishedAt) {
           try {
-            const res = await fetch('https://api.github.com/repos/rootscripts/riff/releases/latest', {
-              headers: { 'User-Agent': 'Riff-Player' }
+            const res = await fetch('https://api.github.com/repos/JMqz/pulse-player/releases/latest', {
+              headers: { Accept: 'application/vnd.github+json' }
             });
             if (res.ok) {
               const gh = await res.json();
@@ -17919,7 +17875,7 @@ function bindCoverHoldZoom(wrapEl) {
         const wasManual = manualUpdateCheck;
         restoreButton();
         if (wasManual) {
-          showToast('You are using the latest version of Riff!', 'success');
+          showToast('You are using the latest version of Pulse!', 'success');
         }
       });
     }
@@ -17931,7 +17887,7 @@ function bindCoverHoldZoom(wrapEl) {
         if (isWaitingToRestart) {
           isWaitingToRestart = false;
           if (latestUpdateInfo?.htmlUrl) {
-            window.open(latestUpdateInfo.htmlUrl, '_blank');
+            openReleasePage(latestUpdateInfo.htmlUrl);
           } else {
             try {
               if (window.electronAPI && window.electronAPI.installUpdateNow) {
@@ -17975,7 +17931,7 @@ function bindCoverHoldZoom(wrapEl) {
 
         if (!canNativeInstall) {
           if (latestUpdateInfo?.htmlUrl) {
-            window.open(latestUpdateInfo.htmlUrl, '_blank');
+            openReleasePage(latestUpdateInfo.htmlUrl);
           } else {
             try {
               if (window.electronAPI && window.electronAPI.installUpdateNow) {
@@ -17991,6 +17947,11 @@ function bindCoverHoldZoom(wrapEl) {
           api.updateAction('now');
         }
       });
+    }
+
+    // Quiet check shortly after startup; only a newer, not-ignored release opens the sheet.
+    if (api && api.checkForUpdates) {
+      setTimeout(() => { if (!manualUpdateCheck) api.checkForUpdates().catch(() => {}); }, 20000);
     }
 
     const btnUpdateLater = document.getElementById('btn-update-later');
@@ -19986,7 +19947,7 @@ function bindCoverHoldZoom(wrapEl) {
     } catch (e) {}
 
     const payload = {
-      app: 'Riff',
+      app: 'Pulse',
       appVersion: appVer,
       exportedAt: new Date().toISOString(),
       playlists: valid.map(pl => ({
@@ -20152,7 +20113,7 @@ function bindCoverHoldZoom(wrapEl) {
     btnImportJsonPlaylists.addEventListener('click', triggerJsonPlaylistImport);
   }
 
-  function confirmChain({ title = 'Import Riff account', message = 'Importing an account will replace your existing playlists, favorites, custom styles, and settings. Riff will restart immediately.', confirmLabel = 'Import & Restart', seconds = 3 } = {}) {
+  function confirmChain({ title = 'Import Pulse account', message = 'Importing an account will replace your existing playlists, favorites, custom styles, and settings. Pulse will restart immediately.', confirmLabel = 'Import & Restart', seconds = 3 } = {}) {
     return new Promise((resolve) => {
       let modal = document.getElementById('confirm-chain-modal');
       if (!modal) {
@@ -20222,7 +20183,7 @@ function bindCoverHoldZoom(wrapEl) {
         }
       } catch (_) {}
       const payload = {
-        app: 'Riff',
+        app: 'Pulse',
         version: '1.0',
         exportedAt: Date.now(),
         localStorage: dump
@@ -20242,8 +20203,8 @@ function bindCoverHoldZoom(wrapEl) {
   if (btnImportAccount) {
     btnImportAccount.onclick = async () => {
       const confirmed = await confirmChain({
-        title: 'Import Riff account',
-        message: 'Importing an account will replace your existing playlists, favorites, custom styles, and settings. Riff will restart immediately.',
+        title: 'Import Pulse account',
+        message: 'Importing an account will replace your existing playlists, favorites, custom styles, and settings. Pulse will restart immediately.',
         confirmLabel: 'Import & Restart',
         seconds: 3
       });
@@ -20549,6 +20510,7 @@ function bindCoverHoldZoom(wrapEl) {
 
     if (track.thumbnail) {
       if (el.downloadPreviewThumb) {
+        el.downloadPreviewThumb.onerror = function () { this.style.display = 'none'; };
         el.downloadPreviewThumb.src = track.thumbnail;
         el.downloadPreviewThumb.style.display = 'block';
       }
@@ -22084,7 +22046,7 @@ function bindCoverHoldZoom(wrapEl) {
     const thumbUrl = (typeof getTrackThumbUrl === 'function' ? getTrackThumbUrl(track) : '') || track.thumbnail || track.cover || track.image || '';
     card.innerHTML = `
       <div class="my-wave-track-cover-wrap">
-        <img class="my-wave-track-cover" src="${escapeHtml(thumbUrl)}" alt="" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'280\\' height=\\'280\\' fill=\\'%23555\\'><rect width=\\'100%\\' height=\\'100%\\'/></svg>'">
+        <img class="my-wave-track-cover" src="${escapeHtml(thumbUrl)}" alt="" data-fallback-src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='280' height='280' fill='%23555'><rect width='100%' height='100%'/></svg>">
         <div class="my-wave-track-play-overlay">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
         </div>
@@ -22843,7 +22805,73 @@ function bindCoverHoldZoom(wrapEl) {
     return card;
   }
 
-  async function renderTrending() {
+  const RECO_CACHE_KEY = 'home_recommendations';
+  const RECO_LOCAL_KEY = 'pulse_reco_cache';
+  const RECO_TTL = 3600 * 1000;
+  let recoFetchGen = 0;
+
+  function getUserLibraryTracks() {
+    const out = [];
+    (Array.isArray(state.history) ? state.history : []).forEach(t => out.push(t));
+    (Array.isArray(state.favorites) ? state.favorites : []).forEach(t => out.push(t));
+    (Array.isArray(state.playlists) ? state.playlists : []).forEach(pl => {
+      (Array.isArray(pl && pl.tracks) ? pl.tracks : []).forEach(t => out.push(t));
+    });
+    return out.filter(t => t && t.title);
+  }
+
+  function getOwnedTrackSets() {
+    const ids = new Set();
+    const keys = new Set();
+    getUserLibraryTracks().forEach(t => {
+      if (t.id) ids.add(String(t.id));
+      if (t.artist) keys.add(getTrackNormalizedKey(t.artist, t.title));
+    });
+    return { ids, keys };
+  }
+
+  // Weighted random pick (recent history > likes > playlists), one seed per artist.
+  function pickRecommendationSeeds(max = 6) {
+    const candidates = [];
+    const hist = Array.isArray(state.history) ? state.history : [];
+    const favs = Array.isArray(state.favorites) ? state.favorites : [];
+    hist.slice(0, 40).forEach((t, i) => candidates.push({ t, w: 3 * Math.pow(0.92, i) }));
+    favs.slice(0, 80).forEach((t, i) => candidates.push({ t, w: 2.5 * Math.pow(0.98, i) }));
+    const plTracks = [];
+    (Array.isArray(state.playlists) ? state.playlists : []).forEach(pl => {
+      (Array.isArray(pl && pl.tracks) ? pl.tracks : []).forEach(t => plTracks.push(t));
+    });
+    plTracks
+      .map((t, i) => ({ t, ts: Number(t && t.addedAt) || 0, i }))
+      .sort((a, b) => (b.ts - a.ts) || (a.i - b.i))
+      .forEach((e, rank) => candidates.push({ t: e.t, w: rank < 50 ? 1.5 : 1 }));
+
+    const keyed = candidates
+      .filter(c => c.t && c.t.title && c.t.artist && c.t.platform !== 'local' && !isTrackBlocked(c.t) && !isArtistBlocked(c.t.artist))
+      .map(c => ({ t: c.t, k: Math.pow(Math.random(), 1 / c.w) }))
+      .sort((a, b) => b.k - a.k);
+
+    const seenArtists = new Set();
+    const seeds = [];
+    for (const { t } of keyed) {
+      const artistKey = normalizeArtistName(t.artist);
+      if (!artistKey || seenArtists.has(artistKey)) continue;
+      seenArtists.add(artistKey);
+      seeds.push({ id: t.id || '', url: t.url || '', title: t.title, artist: t.artist });
+      if (seeds.length >= max) break;
+    }
+    return seeds;
+  }
+
+  function readRecoCache() {
+    const item = window.HomeCache && window.HomeCache.store && window.HomeCache.store[RECO_CACHE_KEY];
+    if (item && Array.isArray(item.data) && item.data.length) return { ts: item.ts || 0, tracks: item.data };
+    const local = safeJson(RECO_LOCAL_KEY, null);
+    if (local && Array.isArray(local.tracks) && local.tracks.length) return { ts: local.ts || 0, tracks: local.tracks };
+    return null;
+  }
+
+  async function renderTrending(force = false) {
     const sec = document.getElementById('sp-trend-sec');
     const row = document.getElementById('sp-trend');
     if (!sec || !row) return;
@@ -22852,18 +22880,27 @@ function bindCoverHoldZoom(wrapEl) {
       return;
     }
 
-    const cachedTrend = (window.HomeCache && window.HomeCache.get('home_trending')) || safeJson('riff_trending_cache', null)?.tracks;
-    const rawLocal = safeJson('riff_trending_cache', null);
-    const cacheItem = window.HomeCache && window.HomeCache.store && window.HomeCache.store['home_trending'];
-    const cacheTs = (cacheItem && cacheItem.ts) ? cacheItem.ts : (rawLocal?.ts || 0);
-    const isFresh = cacheTs > 0 && (Date.now() - cacheTs < 12 * 3600 * 1000);
+    try {
+      localStorage.removeItem('riff_trending_cache');
+      if (window.HomeCache && window.HomeCache.store && window.HomeCache.store.home_trending) delete window.HomeCache.store.home_trending;
+    } catch (_) {}
 
-    if (cachedTrend && cachedTrend.length > 0) {
-      renderTrendingCards(row, cachedTrend);
+    const seeds = pickRecommendationSeeds(6);
+    if (seeds.length === 0) {
+      sec.hidden = true;
+      row.innerHTML = '';
+      return;
+    }
+
+    const owned = getOwnedTrackSets();
+    const cached = readRecoCache();
+    const shown = cached ? renderTrendingCards(row, cached.tracks, owned) : 0;
+    // A manual refresh skips what is on screen now, so the new batch is actually new.
+    const exclude = [...owned.ids];
+    if (force && cached) cached.tracks.forEach(t => { if (t && t.id) exclude.push(String(t.id)); });
+    if (shown > 0) {
       sec.hidden = false;
-      if (isFresh) {
-        return;
-      }
+      if (!force && Date.now() - cached.ts < RECO_TTL) return;
     } else {
       sec.hidden = false;
       row.innerHTML = `
@@ -22876,32 +22913,37 @@ function bindCoverHoldZoom(wrapEl) {
       `;
     }
 
+    const gen = ++recoFetchGen;
     try {
       const port = state.serverPort || 38472;
-      const res = await fetch(`http://127.0.0.1:${port}/api/trending`);
+      const res = await fetch(`http://127.0.0.1:${port}/api/recommendations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seeds, exclude, excludeKeys: [...owned.keys], limit: 24 })
+      });
       const data = await res.json();
+      if (gen !== recoFetchGen) return;
       if (data && data.success && Array.isArray(data.tracks) && data.tracks.length > 0) {
-        if (window.HomeCache) {
-          window.HomeCache.set('home_trending', data.tracks);
-        }
+        if (window.HomeCache) window.HomeCache.set(RECO_CACHE_KEY, data.tracks);
         try {
-          localStorage.setItem('riff_trending_cache', JSON.stringify({ ts: Date.now(), tracks: data.tracks }));
+          localStorage.setItem(RECO_LOCAL_KEY, JSON.stringify({ ts: Date.now(), tracks: data.tracks }));
         } catch (_) {}
-        renderTrendingCards(row, data.tracks);
-        sec.hidden = false;
-      } else if (!cachedTrend || cachedTrend.length === 0) {
+        sec.hidden = renderTrendingCards(row, data.tracks, owned) === 0;
+      } else if (shown === 0) {
         sec.hidden = true;
       }
     } catch (_) {
-      if (!cachedTrend || cachedTrend.length === 0) {
-        sec.hidden = true;
-      }
+      if (gen === recoFetchGen && shown === 0) sec.hidden = true;
     }
   }
 
-  function renderTrendingCards(row, tracks) {
+  function renderTrendingCards(row, tracks, owned) {
     row.innerHTML = '';
-    const filteredTracks = (tracks || []).filter(t => !isTrackBlocked(t) && !isArtistBlocked(t.artist));
+    const filteredTracks = (tracks || []).filter(t => {
+      if (!t || isTrackBlocked(t) || isArtistBlocked(t.artist)) return false;
+      if (owned && (owned.ids.has(String(t.id)) || owned.keys.has(getTrackNormalizedKey(t.artist, t.title)))) return false;
+      return true;
+    });
     filteredTracks.forEach((track, idx) => {
       const card = spCard({
         cover: (typeof getTrackThumbUrl === 'function' ? getTrackThumbUrl(track) : '') || track.thumbnail || track.cover || '',
@@ -22917,6 +22959,7 @@ function bindCoverHoldZoom(wrapEl) {
     });
     bindHorizontalWheel(row);
     requestAnimationFrame(() => updateRowFade(row));
+    return filteredTracks.length;
   }
 
   const MIX_KEY = 'riff_daily_mixes';
@@ -23226,6 +23269,21 @@ function bindCoverHoldZoom(wrapEl) {
       if (state.mixesBusy) return;
       localStorage.removeItem(MIX_KEY);
       generateDailyMixes(true);
+    });
+  }
+
+  const btnRegenRecommendations = document.getElementById('btn-regen-recommendations');
+  if (btnRegenRecommendations) {
+    btnRegenRecommendations.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (btnRegenRecommendations.classList.contains('is-busy')) return;
+      btnRegenRecommendations.classList.add('is-busy');
+      try {
+        await renderTrending(true);
+      } catch (_) {
+      } finally {
+        btnRegenRecommendations.classList.remove('is-busy');
+      }
     });
   }
 
@@ -23603,7 +23661,7 @@ function bindCoverHoldZoom(wrapEl) {
       }
       const move = window.confirm(
         'Move your existing music to the new folder?\n\n' +
-        'OK: move all downloaded and imported files, then restart Riff.\n' +
+        'OK: move all downloaded and imported files, then restart Pulse.\n' +
         'Cancel: switch to the new folder without moving (files stay in the old one).'
       );
       btnChangeMusicFolder.disabled = true;
@@ -23623,7 +23681,7 @@ function bindCoverHoldZoom(wrapEl) {
         return;
       }
       btnChangeMusicFolder.textContent = 'Restarting...';
-      showToast('Restarting Riff...');
+      showToast('Restarting Pulse...');
       setTimeout(() => { if (window.electronAPI.restartApp) window.electronAPI.restartApp(); }, 400);
     });
   }
@@ -24426,7 +24484,7 @@ function bindCoverHoldZoom(wrapEl) {
   const HOME_SECTION_DEFS = {
     'sp-made-sec': { name: 'For you', icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 10v2M8 6v10M12 2v18M16 6v10M20 10v2"/></svg>' },
     'sp-quick-sec': { name: 'Home / Quick picks', icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>' },
-    'sp-trend-sec': { name: 'Trending now', icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2c1 4 5 5.5 5 10a5 5 0 0 1-10 0c0-2 1-3 2-4 0 2 1 3 2 3 0-3-1-6 1-9z"/></svg>' },
+    'sp-trend-sec': { name: 'Recomendado para você', icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4z"/></svg>' },
     'sp-artists-sec': { name: 'Favorite artists', icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>' }
   };
 
