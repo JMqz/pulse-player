@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Pulse main window. The UI is served by the app's own pulse:// protocol (http://pulse.localhost on Windows), which Tauri treats as a local origin.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

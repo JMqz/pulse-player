@@ -1,0 +1,13 @@
+{
+  "name": "pulse-player",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pulse - lightweight YouTube Music, YouTube and Spotify player for Windows (Tauri v2 + WebView2).",
+  "license": "MIT",
+  "author": "João Maurício",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JMqz/pulse-player.git"
+  },
+  "dependencies": {}
+}

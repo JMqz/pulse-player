@@ -1,0 +1,29 @@
+# Local-only notes
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.claude/
+.gemini/
+.antigravity/
+scratch/
+
+# Build output
+src-tauri/target/
+src-tauri/gen/
+dist/*.exe
+dist/*.dll
+release/
+
+# Bundled third-party binaries (fetched by build.ps1 / package.ps1)
+runtime/
+bin/
+node_modules/
+
+# Local state
+.rifftutorial
+*.log
+*.tmp
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
