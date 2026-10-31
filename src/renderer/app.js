@@ -1,4 +1,4 @@
-(function initRiffDiskStorageDaemon() {
+﻿(function initRiffDiskStorageDaemon() {
 if (!window.electronAPI || typeof window.electronAPI.storageInitSync !== 'function') return;
 const origGet = Storage.prototype.getItem;
 const origSet = Storage.prototype.setItem;
@@ -13709,6 +13709,20 @@ function bindCoverHoldZoom(wrapEl) {
       if (el.newPlaylistInput) el.newPlaylistInput.focus();
     });
   });
+
+  const btnImportSpPage = document.getElementById('btn-import-spotify-page');
+  if (btnImportSpPage) {
+    btnImportSpPage.addEventListener('click', () => {
+      if (typeof openSpotifyImportModal === 'function') openSpotifyImportModal();
+    });
+  }
+
+  const btnImportYtPage = document.getElementById('btn-import-youtube-page');
+  if (btnImportYtPage) {
+    btnImportYtPage.addEventListener('click', () => {
+      if (typeof openLinkImportModal === 'function') openLinkImportModal('youtube');
+    });
+  }
 
   if (el.btnCancelNewPlaylist) {
     el.btnCancelNewPlaylist.addEventListener('click', () => {
