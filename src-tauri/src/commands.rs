@@ -59,6 +59,11 @@ pub fn set_mini_lyrics(app: AppHandle, enabled: bool) -> bool {
 }
 
 #[tauri::command]
+pub fn set_player_idle(app: AppHandle, idle: bool) {
+    window::set_page_idle(&app, idle);
+}
+
+#[tauri::command]
 pub fn set_zoom(w: WebviewWindow, factor: f64) {
     if factor.is_finite() && (0.25..=5.0).contains(&factor) {
         let _ = w.set_zoom(factor);

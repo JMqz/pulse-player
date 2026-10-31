@@ -10649,3 +10649,79 @@ body.perf .i18n-shape-box {
   }
 }
 
+
+/* Aba Playlists (view-playlists) */
+#view-playlists .view-title {
+  font-size: calc(26px * var(--font-scale, 1));
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface);
+  margin: 0;
+}
+.view-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.playlists-page-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 20px 16px;
+  padding-bottom: 24px;
+}
+.playlists-page-empty {
+  grid-column: 1 / -1;
+  padding: 48px 0;
+  text-align: center;
+}
+.playlist-page-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 20px;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 200ms ease;
+  animation: m3FadeUp 260ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+.playlist-page-card:hover,
+.playlist-page-card:focus-visible {
+  background: var(--md-sys-color-surface-container-high);
+  outline: none;
+}
+.playlist-page-cover {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--md-sys-color-surface-container);
+}
+.playlist-page-cover {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--md-sys-color-outline);
+}
+.playlist-page-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.playlist-page-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.playlist-page-name {
+  font-size: calc(14px * var(--font-scale, 1));
+  font-weight: 500;
+  color: var(--md-sys-color-on-surface);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.playlist-page-count {
+  font-size: calc(12px * var(--font-scale, 1));
+  color: var(--md-sys-color-on-surface-variant);
+}

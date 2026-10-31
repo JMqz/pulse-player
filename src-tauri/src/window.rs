@@ -11,6 +11,9 @@ use crate::{paths, AppState};
 pub const MAIN: &str = "main";
 const MIN_W: f64 = 800.0;
 const MIN_H: f64 = 540.0;
+/// Without focus for this long (another app in front, mini player left aside) the WebView
+/// is asked to trim memory even though it is still visible.
+const UNFOCUSED_LOW_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Clone, Copy, Serialize, Deserialize, Default)]
 pub struct Bounds {
@@ -31,6 +34,12 @@ pub struct WindowState {
     pub pre_mini: Option<Bounds>,
     pub pre_mini_lyrics_h: Option<f64>,
     pub visible: bool,
+    /// Bumped on every focus change so a pending "unfocused for a while" timer can tell it is stale.
+    focus_gen: u64,
+    unfocused_long: bool,
+    /// The page reports the player idle (paused/stopped and no input for a while).
+    page_idle: bool,
+    memory_low: bool,
 }
 
 fn state_file() -> std::path::PathBuf {
@@ -60,11 +69,15 @@ pub fn save_bounds(ws: &Mutex<WindowState>) {
 /// Browser flags: Electron ran with webSecurity:false and autoplay allowed; the renderer relies on
 /// cross-origin fetches to the local server and to lyric/cover APIs. Tauri's own default
 /// --disable-features list is repeated because setting args replaces it.
+/// Memory: a small V8 old space (the page heap is ~5-30 MB), one raster thread and no GPU
+/// shader disk cache keep the renderer and GPU process lean.
 fn browser_args(proxy: &str) -> String {
     let mut args = String::from(
         "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion,Translate,AutofillServerCommunication \
          --disable-web-security --autoplay-policy=no-user-gesture-required \
-         --renderer-process-limit=1 --js-flags=--max-old-space-size=256 \
+         --enable-features=TrimOnMemoryPressure,ResourceScheduler \
+         --renderer-process-limit=1 --js-flags=--max-old-space-size=96 \
+         --num-raster-threads=1 --disable-gpu-shader-disk-cache --disable-bundled-ppapi-flash \
          --disk-cache-size=33554432 --media-cache-size=33554432 \
          --disable-background-networking --disable-component-update --disable-sync --disable-speech-api",
     );
@@ -172,24 +185,72 @@ fn on_event(app: &AppHandle, event: &WindowEvent) {
                 ws.visible = visible;
                 drop(ws);
                 emit(app, "window-visibility", serde_json::Value::Bool(visible));
-                set_memory_target(app, visible);
+                apply_memory_target(app);
             }
         }
+        WindowEvent::Focused(focused) => on_focus(app, *focused),
         _ => {}
     }
 }
 
-/// Hidden/minimized: ask WebView2 to trim memory (MemoryUsageTargetLevel LOW: caches and
-/// GPU resources are released, playback keeps running); back to NORMAL when shown.
+fn on_focus(app: &AppHandle, focused: bool) {
+    let state = app.state::<AppState>();
+    let gen = {
+        let mut ws = state.window.lock().unwrap();
+        ws.focus_gen += 1;
+        ws.unfocused_long = false;
+        ws.focus_gen
+    };
+    apply_memory_target(app);
+    if !focused {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(UNFOCUSED_LOW_AFTER);
+            let state = app.state::<AppState>();
+            {
+                let mut ws = state.window.lock().unwrap();
+                if ws.focus_gen != gen {
+                    return;
+                }
+                ws.unfocused_long = true;
+            }
+            apply_memory_target(&app);
+        });
+    }
+}
+
+/// Called by the page (set_player_idle) when playback has been stopped/paused with no input for a while.
+pub fn set_page_idle(app: &AppHandle, idle: bool) {
+    app.state::<AppState>().window.lock().unwrap().page_idle = idle;
+    apply_memory_target(app);
+}
+
+/// LOW while hidden, unfocused for UNFOCUSED_LOW_AFTER, or with the player idle; NORMAL otherwise.
+fn apply_memory_target(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let low = {
+        let mut ws = state.window.lock().unwrap();
+        let low = !ws.visible || ws.unfocused_long || ws.page_idle;
+        if low == ws.memory_low {
+            return;
+        }
+        ws.memory_low = low;
+        low
+    };
+    set_memory_target(app, !low);
+}
+
+/// MemoryUsageTargetLevel LOW makes WebView2 release caches and GPU resources (playback keeps
+/// running); NORMAL when the window is in use again.
 #[cfg(windows)]
-fn set_memory_target(app: &AppHandle, visible: bool) {
+fn set_memory_target(app: &AppHandle, normal: bool) {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
     };
     use windows_core::Interface;
     let Some(window) = app.get_webview_window(MAIN) else { return };
     let _ = window.with_webview(move |wv| unsafe {
-        let level = if visible { COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL } else { COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW };
+        let level = if normal { COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL } else { COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW };
         if let Ok(core) = wv.controller().CoreWebView2() {
             if let Ok(core19) = core.cast::<ICoreWebView2_19>() {
                 let _ = core19.SetMemoryUsageTargetLevel(level);
@@ -198,7 +259,7 @@ fn set_memory_target(app: &AppHandle, visible: bool) {
     });
 }
 #[cfg(not(windows))]
-fn set_memory_target(_app: &AppHandle, _visible: bool) {}
+fn set_memory_target(_app: &AppHandle, _normal: bool) {}
 
 /// Calls window.__pulseEmit(name, payload) in the page (see src/renderer/tauri-bridge.js).
 pub fn emit(app: &AppHandle, name: &str, payload: serde_json::Value) {
@@ -242,7 +303,7 @@ fn set_visible(app: &AppHandle, visible: bool) {
     };
     if changed {
         emit(app, "window-visibility", serde_json::Value::Bool(visible));
-        set_memory_target(app, visible);
+        apply_memory_target(app);
     }
 }
 

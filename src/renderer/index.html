@@ -109,6 +109,15 @@
             <span class="nav-badge" id="favorites-count">0</span>
           </div>
         </button>
+
+        <button class="nav-item" data-view="playlists" id="nav-playlists" title="Playlists">
+          <div class="nav-indicator">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15V6M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM12 12H3M16 6H3M12 18H3"></path>
+            </svg>
+            <span class="nav-badge" id="playlists-count">0</span>
+          </div>
+        </button>
         <button class="nav-item" data-view="albums" id="nav-albums" title="Albums"><div class="nav-indicator"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg><span class="nav-badge" id="albums-count">0</span></div></button>
 
         <button class="nav-item" data-view="local" id="nav-local" title="My files">
@@ -295,6 +304,19 @@
         <div class="tracks-list" id="favorites-tracks-list">
           <div class="empty-hint">No favorite tracks yet. Click the heart icon on any song to save it.</div>
         </div>
+      </section>
+
+      <section class="content-view" id="view-playlists">
+        <div class="view-header">
+          <h1 class="view-title" data-i18n>Playlists</h1>
+          <div class="view-header-actions">
+            <button type="button" class="btn-filled-pill btn-pill-primary" id="btn-new-playlist-page">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+              <span data-i18n>New playlist</span>
+            </button>
+          </div>
+        </div>
+        <div class="playlists-page-grid" id="playlists-page-grid"></div>
       </section>
 
       <section class="content-view" id="view-albums"><div class="search-albums-row" id="saved-albums-grid" style="flex-wrap: wrap;"></div></section>

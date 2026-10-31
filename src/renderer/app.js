@@ -248,8 +248,47 @@ function stripYoutubeTopic(artist) {
   return artist.endsWith(' - Topic') ? artist.slice(0, -8).trim() : artist;
 }
 
+// Caps a requestAnimationFrame loop at ~30 FPS. On 144/165 Hz screens rAF would otherwise run
+// these canvas/gradient animations 5x more often than they need; between frames we wait on a
+// timer instead of a no-op rAF so the compositor isn't woken up either. The handle is truthy
+// while a frame is pending and goes to cancelCappedFrame().
+const CAPPED_FRAME_MS = 1000 / 30;
+function requestCappedFrame(cb, lastFrameTs) {
+  const h = { raf: 0, timer: 0 };
+  const wait = CAPPED_FRAME_MS - (performance.now() - (lastFrameTs || 0));
+  if (wait <= 4) h.raf = requestAnimationFrame(cb);
+  else h.timer = setTimeout(() => { h.timer = 0; h.raf = requestAnimationFrame(cb); }, wait - 2);
+  return h;
+}
+function cancelCappedFrame(h) {
+  if (!h) return;
+  if (h.timer) clearTimeout(h.timer);
+  if (h.raf) cancelAnimationFrame(h.raf);
+}
+
+// Only the newest entries survive: the home caches are rewritten whole on every set().
+const HOME_CACHE_MAX_KEYS = 12;
+const HOME_CACHE_MAX_ITEMS = 100;
+const HOME_CACHE_MAX_AGE_MS = 3 * 24 * 3600 * 1000;
+function trimHomeCacheData(data) {
+  if (Array.isArray(data)) return data.length > HOME_CACHE_MAX_ITEMS ? data.slice(0, HOME_CACHE_MAX_ITEMS) : data;
+  if (data && typeof data === 'object' && Array.isArray(data.mixes) && data.mixes.length > HOME_CACHE_MAX_ITEMS) {
+    return { ...data, mixes: data.mixes.slice(0, HOME_CACHE_MAX_ITEMS) };
+  }
+  return data;
+}
+
 const HomeCache = {
   store: {},
+  prune() {
+    const now = Date.now();
+    const entries = Object.entries(this.store)
+      .filter(([, v]) => v && v.ts && v.data && now - v.ts <= HOME_CACHE_MAX_AGE_MS)
+      .sort((a, b) => b[1].ts - a[1].ts)
+      .slice(0, HOME_CACHE_MAX_KEYS);
+    this.store = {};
+    for (const [k, v] of entries) this.store[k] = { ts: v.ts, data: trimHomeCacheData(v.data) };
+  },
   async init() {
     try {
       if (window.electronAPI && window.electronAPI.readCacheFile) {
@@ -257,6 +296,7 @@ const HomeCache = {
         if (disk && typeof disk === 'object') this.store = disk;
       }
     } catch (_) {}
+    this.prune();
   },
   get(key, maxAgeMs = 12 * 3600 * 1000) {
     const item = this.store[key];
@@ -265,7 +305,8 @@ const HomeCache = {
     return item.data;
   },
   set(key, data) {
-    this.store[key] = { ts: Date.now(), data };
+    this.store[key] = { ts: Date.now(), data: trimHomeCacheData(data) };
+    this.prune();
     try {
       if (window.electronAPI && window.electronAPI.writeCacheFile) {
         window.electronAPI.writeCacheFile(this.store);
@@ -1824,6 +1865,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                           navActiveIndicator: document.getElementById('nav-active-indicator'),
                           navDiscover: document.getElementById('nav-discover'),
                           navFavorites: document.getElementById('nav-favorites'),
+                          navPlaylists: document.getElementById('nav-playlists'),
                           navAlbums: document.getElementById('nav-albums'),
                           navLocal: document.getElementById('nav-local'),
                           navHistory: document.getElementById('nav-history'),
@@ -1852,6 +1894,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                           viewDiscover: document.getElementById('view-discover'),
                           viewFavorites: document.getElementById('view-favorites'),
+                          viewPlaylists: document.getElementById('view-playlists'),
+                          playlistsPageGrid: document.getElementById('playlists-page-grid'),
+                          btnNewPlaylistPage: document.getElementById('btn-new-playlist-page'),
                           viewAlbums: document.getElementById('view-albums'),
                           savedAlbumsGrid: document.getElementById('saved-albums-grid'),
                           viewLocal: document.getElementById('view-local'),
@@ -2787,7 +2832,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function stopVisualizers() {
     if (animationFrameId) {
-      cancelAnimationFrame(animationFrameId);
+      cancelCappedFrame(animationFrameId);
       animationFrameId = null;
     }
     const miniCanvas = el.visualizerCanvas;
@@ -2899,7 +2944,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   let lastFrameTime = 0;
   function startVisualizers() {
     if (!state.isWindowVisible) return;
-    if (animationFrameId) cancelAnimationFrame(animationFrameId);
+    if (animationFrameId) cancelCappedFrame(animationFrameId);
 
     const analyserNode = audioEngine && audioEngine.getAnalyserNode ? audioEngine.getAnalyserNode() : null;
     const miniCanvas = el.visualizerCanvas;
@@ -2930,7 +2975,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         hasDrawnPausedFrame = false;
       }
 
-      animationFrameId = requestAnimationFrame(renderLoop);
+      if (timestamp) lastFrameTime = timestamp;
+      animationFrameId = isDraggingScrubber
+        ? { raf: requestAnimationFrame(renderLoop), timer: 0 }
+        : requestCappedFrame(renderLoop, lastFrameTime);
 
       try {
         const activeTrim = state.currentTrack ? getTrackTrim(state.currentTrack) : null;
@@ -2955,9 +3003,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         const pct = Math.max(0, Math.min(100, (cur / trimDraft.dur) * 100));
         ccPlayhead.style.left = `${pct}%`;
       }
-
-      if (document.body.classList.contains('perf') && timestamp - lastFrameTime < 33) return;
-      lastFrameTime = timestamp;
 
       const isVisualizerVisible = miniCanvas && miniCanvas.offsetParent !== null && !document.hidden;
       const isTvkVisualizerVisible = state.isTvKaraokeOpen && tvkCanvas && tvkCanvas.offsetParent !== null && !document.hidden;
@@ -3508,11 +3553,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         lyricsScrollRaf = 0;
       }
       if (typeof gradientRaf !== 'undefined' && gradientRaf) {
-        cancelAnimationFrame(gradientRaf);
+        cancelCappedFrame(gradientRaf);
         gradientRaf = 0;
       }
       if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
+        cancelCappedFrame(animationFrameId);
         animationFrameId = null;
       }
       if (typeof cacheRafId !== 'undefined' && cacheRafId) {
@@ -5819,13 +5864,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   function startGradientLoop() {
     if (gradientRaf) return;
-    const tick = () => {
+    let last = 0;
+    const tick = (ts) => {
       gradientRaf = 0;
       if (!state.isPlaying || !state.isWindowVisible || !isGradientMode()) return;
+      last = ts;
       updateActiveGradient();
-      gradientRaf = requestAnimationFrame(tick);
+      gradientRaf = requestCappedFrame(tick, last);
     };
-    gradientRaf = requestAnimationFrame(tick);
+    gradientRaf = requestCappedFrame(tick, 0);
   }
 
   function getLyricTargetScroll(activeEl, parent) {
@@ -7795,6 +7842,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const origHtml = btnYtSheetSignin.innerHTML;
         btnYtSheetSignin.disabled = true;
         btnYtSheetSignin.innerHTML = '<svg class="m3-btn-shape-spinner" style="width:15px;height:15px;" viewBox="-180 -180 360 360"><path fill="currentColor"/></svg><span>Signing in...</span>';
+        if (typeof kickShapeSpinners === 'function') kickShapeSpinners();
         try {
           const res = await window.electronAPI.googleLogin();
           if (res && res.loggedIn) {
@@ -9285,6 +9333,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     requestAnimationFrame(frame);
   }
 
+  // Wakes the spinner loop after a .m3-btn-shape-spinner is inserted or un-hidden.
+  var kickShapeSpinners = () => {};
   function startButtonShapeSpinners() {
     const S = window.RiffShapes;
     if (!S || !S.ready()) return;
@@ -9296,11 +9346,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     let rafId = 0;
     let idleTimer = 0;
+    // fast: next frame; slow: re-check in 500 ms (a spinner exists but isn't rendered, e.g. in a
+    // closed sheet). With no spinner at all the loop stops until kickShapeSpinners() is called.
     const schedule = (fast) => {
       if (rafId || idleTimer || document.hidden) return;
       if (fast) rafId = requestAnimationFrame(tick);
-      else idleTimer = setTimeout(() => { idleTimer = 0; schedule(true); }, 250);
+      else idleTimer = setTimeout(() => { idleTimer = 0; schedule(true); }, 500);
     };
+    kickShapeSpinners = () => schedule(true);
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
         if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
@@ -9312,7 +9365,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function tick(now) {
       rafId = 0;
-      const spinners = document.querySelectorAll('.m3-btn-shape-spinner:not(.hidden)');
+      const all = document.querySelectorAll('.m3-btn-shape-spinner:not(.hidden)');
+      if (all.length === 0) return;
+      const spinners = [...all].filter(svg => svg.getClientRects().length > 0);
       if (spinners.length > 0) {
         if (now - stepStart >= STEP_MS) {
           fromIdx = toIdx;
@@ -11527,6 +11582,7 @@ function renderClickableArtists(container, rawArtist) {
 
   function refreshNavBadges() {
     updateFavoritesBadge();
+    updatePlaylistsBadge();
     updateAlbumsCount();
     updateLocalBadge();
     updateHistoryBadge();
@@ -11922,7 +11978,64 @@ function renderClickableArtists(container, rawArtist) {
     renderFallback();
   }
 
+  function updatePlaylistsBadge() {
+    setNavCount(document.getElementById('playlists-count'), (state.playlists || []).length);
+  }
+
+  function renderPlaylistsPage() {
+    const grid = el.playlistsPageGrid;
+    if (!grid) return;
+    grid.innerHTML = '';
+    const list = state.playlists || [];
+    if (list.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-hint playlists-page-empty';
+      empty.textContent = 'No playlists yet. Create one or import from Spotify.';
+      grid.appendChild(empty);
+      return;
+    }
+    list.forEach((pl) => {
+      const card = document.createElement('div');
+      card.className = 'playlist-page-card';
+      card.dataset.playlistId = pl.id;
+      card.setAttribute('role', 'button');
+      card.tabIndex = 0;
+
+      const cover = document.createElement('div');
+      cover.className = 'playlist-page-cover';
+      renderPlaylistCover(cover, pl, 180);
+
+      const count = (pl.tracks || []).length;
+      const info = document.createElement('div');
+      info.className = 'playlist-page-info';
+      info.innerHTML = `
+        <span class="playlist-page-name" title="${escapeHtml(pl.name || 'untitled')}">${escapeHtml(pl.name || 'untitled')}</span>
+        <span class="playlist-page-count">${count} track${count === 1 ? '' : 's'}</span>
+      `;
+
+      card.appendChild(cover);
+      card.appendChild(info);
+      card.addEventListener('click', () => openPlaylistDetail(pl.id));
+      card.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          openPlaylistDetail(pl.id);
+        }
+      });
+      card.addEventListener('contextmenu', async (e) => {
+        e.preventDefault();
+        if (window.electronAPI && window.electronAPI.showPlaylistContextMenu) {
+          const act = await window.electronAPI.showPlaylistContextMenu(pl.id);
+          if (act === 'export') exportSinglePlaylist(pl.id);
+        }
+      });
+      grid.appendChild(card);
+    });
+  }
+
   function renderPlaylistsList() {
+    updatePlaylistsBadge();
+    if (state.currentView === 'playlists') renderPlaylistsPage();
     if (!el.playlistsList) return;
     el.playlistsList.innerHTML = '';
     if (!state.playlists || state.playlists.length === 0) {
@@ -12427,7 +12540,7 @@ function renderClickableArtists(container, rawArtist) {
     localStorage.setItem('devsize_playlists', JSON.stringify(state.playlists));
     state.currentPlaylistId = null;
     renderPlaylistsList();
-    switchView('discover');
+    switchView('playlists');
   }
 
   let trackToAddToPlaylist = null;
@@ -12663,13 +12776,13 @@ function renderClickableArtists(container, rawArtist) {
 
     requestAnimationFrame(() => {
       document.querySelectorAll('.no-enter-anim').forEach(c => c.classList.remove('no-enter-anim'));
-      [el.viewDiscover, el.viewFavorites, el.viewAlbums, el.viewLocal, el.viewHistory, el.viewQueue, el.viewPlaylistDetail, el.viewAlbum, el.viewArtist, el.viewSettings].forEach(v => {
+      [el.viewDiscover, el.viewFavorites, el.viewPlaylists, el.viewAlbums, el.viewLocal, el.viewHistory, el.viewQueue, el.viewPlaylistDetail, el.viewAlbum, el.viewArtist, el.viewSettings].forEach(v => {
         if (v) v.classList.remove('active');
       });
 
         const nestedView = viewName === 'playlist-detail' || viewName === 'album' || viewName === 'artist';
-        if (!nestedView) {
-          [el.navDiscover, el.navFavorites, el.navAlbums, el.navLocal, el.navHistory, el.navQueue, el.navSettings].forEach(n => {
+        if (!nestedView || viewName === 'playlist-detail') {
+          [el.navDiscover, el.navFavorites, el.navPlaylists, el.navAlbums, el.navLocal, el.navHistory, el.navQueue, el.navSettings].forEach(n => {
             if (n) n.classList.remove('active');
           });
         }
@@ -12684,6 +12797,10 @@ function renderClickableArtists(container, rawArtist) {
             if (el.viewFavorites) el.viewFavorites.classList.add('active');
             if (el.navFavorites) el.navFavorites.classList.add('active');
             renderFavoritesView();
+          } else if (viewName === 'playlists') {
+            if (el.viewPlaylists) el.viewPlaylists.classList.add('active');
+            if (el.navPlaylists) el.navPlaylists.classList.add('active');
+            renderPlaylistsPage();
           } else if (viewName === 'albums') {
             if (el.viewAlbums) el.viewAlbums.classList.add('active');
             if (el.navAlbums) el.navAlbums.classList.add('active');
@@ -12702,6 +12819,7 @@ function renderClickableArtists(container, rawArtist) {
             renderQueueView();
           } else if (viewName === 'playlist-detail') {
             if (el.viewPlaylistDetail) el.viewPlaylistDetail.classList.add('active');
+            if (el.navPlaylists) el.navPlaylists.classList.add('active');
           } else if (viewName === 'album') {
             if (el.viewAlbum) el.viewAlbum.classList.add('active');
           } else if (viewName === 'artist') {
@@ -12936,6 +13054,7 @@ function updateNavIndicator(animate) {
       if (isBuffering) {
         tvkBtn.classList.add('buffering');
         if (tvkPlaySpinner) tvkPlaySpinner.classList.remove('hidden');
+        if (typeof kickShapeSpinners === 'function') kickShapeSpinners();
         if (tvkPlayIcon) tvkPlayIcon.classList.add('hidden');
         if (tvkPauseIcon) tvkPauseIcon.classList.add('hidden');
       } else {
@@ -12948,6 +13067,7 @@ function updateNavIndicator(animate) {
     if (isBuffering) {
       if (el.btnPlayPause) el.btnPlayPause.classList.add('buffering');
       if (el.playbarSpinner) el.playbarSpinner.classList.remove('hidden');
+      if (typeof kickShapeSpinners === 'function') kickShapeSpinners();
       if (el.playIcon) el.playIcon.classList.add('hidden');
       if (el.pauseIcon) el.pauseIcon.classList.add('hidden');
       setPlayPauseState(true, true);
@@ -13014,6 +13134,7 @@ function updateNavIndicator(animate) {
   });
 
   if (el.navFavorites) el.navFavorites.addEventListener('click', () => switchView('favorites'));
+  if (el.navPlaylists) el.navPlaylists.addEventListener('click', () => switchView('playlists'));
   if (el.navAlbums) el.navAlbums.addEventListener('click', () => switchView('albums'));
   if (el.navLocal) el.navLocal.addEventListener('click', () => switchView('local'));
   if (el.navHistory) el.navHistory.addEventListener('click', () => switchView('history'));
@@ -13544,7 +13665,11 @@ function bindCoverHoldZoom(wrapEl) {
       if (state.currentPlaylistId) openPlaylistDetail(state.currentPlaylistId);
     });
   }
-  if (el.btnBackPlaylists) el.btnBackPlaylists.addEventListener('click', () => switchView('discover'));
+  if (el.btnBackPlaylists) el.btnBackPlaylists.addEventListener('click', () => {
+    const prev = state.previousView;
+    const nested = !prev || prev === 'playlist-detail' || prev === 'album' || prev === 'artist';
+    switchView(nested ? 'playlists' : prev);
+  });
 
   const deletePlaylistModal = document.getElementById('delete-playlist-modal');
   const deletePlaylistMsg = document.getElementById('delete-playlist-msg');
@@ -13576,13 +13701,14 @@ function bindCoverHoldZoom(wrapEl) {
 
 
 
-  if (el.btnNewPlaylist) {
-    el.btnNewPlaylist.addEventListener('click', () => {
+  [el.btnNewPlaylist, el.btnNewPlaylistPage].forEach((btn) => {
+    if (!btn) return;
+    btn.addEventListener('click', () => {
       if (el.newPlaylistInput) el.newPlaylistInput.value = '';
       if (el.createPlaylistModal) openModal(el.createPlaylistModal);
       if (el.newPlaylistInput) el.newPlaylistInput.focus();
     });
-  }
+  });
 
   if (el.btnCancelNewPlaylist) {
     el.btnCancelNewPlaylist.addEventListener('click', () => {
@@ -14410,6 +14536,7 @@ function bindCoverHoldZoom(wrapEl) {
     sf: {
       '#nav-discover svg': '<circle cx="12" cy="12" r="9.5"></circle><polygon points="15.5 8.5 13.5 13.5 8.5 15.5 10.5 10.5 15.5 8.5" fill="currentColor"></polygon>',
       '#nav-favorites svg': '<path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"></path>',
+      '#nav-playlists svg': '<path d="M21 15V6M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM12 12H3M16 6H3M12 18H3"></path>',
       '#nav-albums svg': '<circle cx="12" cy="12" r="9.5"></circle><circle cx="12" cy="12" r="3.2"></circle><circle cx="12" cy="12" r="1" fill="currentColor"></circle>',
       '#nav-local svg': '<path d="M2.5 7A2.5 2.5 0 0 1 5 4.5h4.2c.8 0 1.5.4 1.9 1l1.2 1.8c.4.6 1.1 1 1.9 1H19A2.5 2.5 0 0 1 21.5 11v6.5a2.5 2.5 0 0 1-2.5 2.5H5a2.5 2.5 0 0 1-2.5-2.5V7z"></path>',
       '#nav-history svg': '<circle cx="12" cy="12" r="9.5"></circle><polyline points="12 6.5 12 12 15.5 14"></polyline>',
@@ -14426,6 +14553,7 @@ function bindCoverHoldZoom(wrapEl) {
     lucide: {
       '#nav-discover svg': '<circle cx="12" cy="12" r="10"></circle><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"></polygon>',
       '#nav-favorites svg': '<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"></path>',
+      '#nav-playlists svg': '<path d="M21 15V6M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM12 12H3M16 6H3M12 18H3"></path>',
       '#nav-albums svg': '<circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="4"></circle><circle cx="12" cy="12" r="1"></circle>',
       '#nav-local svg': '<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"></path>',
       '#nav-history svg': '<circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline>',
@@ -14442,6 +14570,7 @@ function bindCoverHoldZoom(wrapEl) {
     solar: {
       '#nav-discover svg': '<circle cx="12" cy="12" r="9.5"></circle><polygon points="16 8 13.8 13.8 8 16 10.2 10.2 16 8"></polygon>',
       '#nav-favorites svg': '<path d="M12.62 20.89c-.38.14-.86.14-1.24 0C8.48 19.82 2 15.69 2 8.69A5.69 5.69 0 0 1 7.69 3c1.64 0 3.12.7 4.31 1.83A6.05 6.05 0 0 1 16.31 3 5.69 5.69 0 0 1 22 8.69c0 7-6.48 11.13-9.38 12.2z"></path>',
+      '#nav-playlists svg': '<path d="M21 15V6M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM12 12H3M16 6H3M12 18H3"></path>',
       '#nav-albums svg': '<circle cx="12" cy="12" r="9.5"></circle><circle cx="12" cy="12" r="3"></circle>',
       '#nav-local svg': '<path d="M2 11c0-2.83 0-4.24.88-5.12C3.76 5 5.17 5 8 5h.5c.78 0 1.43 0 1.98.24.54.23.97.66 1.52 1.48L13 8h3c2.83 0 4.24 0 5.12.88C22 9.76 22 11.17 22 14v2c0 2.83 0 4.24-.88 5.12C20.24 22 18.83 22 16 22H8c-2.83 0-4.24 0-5.12-.88C2 20.24 2 18.83 2 16v-5z"></path>',
       '#nav-history svg': '<circle cx="12" cy="12" r="9.5"></circle><polyline points="12 7 12 12 15 13.5"></polyline>',
@@ -17789,6 +17918,7 @@ function bindCoverHoldZoom(wrapEl) {
         manualUpdateCheck = true;
         btn.disabled = true;
         btn.innerHTML = '<svg class="m3-btn-shape-spinner" style="width:16px;height:16px;margin-right:6px;" viewBox="-180 -180 360 360"><path fill="currentColor"/></svg><span>Checking...</span>';
+        if (typeof kickShapeSpinners === 'function') kickShapeSpinners();
 
         if (!api || !api.checkForUpdates) {
           checkDirectFromRenderer();
@@ -19527,6 +19657,7 @@ function bindCoverHoldZoom(wrapEl) {
       const orig = btnAdvYtLogin.innerHTML;
       btnAdvYtLogin.disabled = true;
       btnAdvYtLogin.innerHTML = '<svg class="m3-btn-shape-spinner" style="width:14px;height:14px;margin-right:6px;" viewBox="-180 -180 360 360"><path fill="currentColor"/></svg><span>Signing in...</span>';
+      if (typeof kickShapeSpinners === 'function') kickShapeSpinners();
       try {
         const res = await window.electronAPI.googleLogin();
         googleConnected = !!(res && res.loggedIn);
@@ -20956,6 +21087,7 @@ function bindCoverHoldZoom(wrapEl) {
       const spinnerEl = el.downloadSpinner || document.getElementById('download-spinner');
       if (spinnerEl) {
         spinnerEl.innerHTML = '<div class="m3-spinner-container" style="width: 32px; height: 32px; padding: 4px; background: transparent; color: var(--md-sys-color-primary);"><svg class="m3-btn-shape-spinner" viewBox="-180 -180 360 360" style="width: 24px; height: 24px;"><path fill="currentColor"/></svg></div>';
+        if (typeof kickShapeSpinners === 'function') kickShapeSpinners();
       }
 
       showToast(`Downloading: ${t.title || 'Track'} (.${selectedFormat})`, 'info');

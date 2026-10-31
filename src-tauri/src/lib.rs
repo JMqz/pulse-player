@@ -152,6 +152,7 @@ pub fn run() {
             commands::toggle_mini_window,
             commands::set_mini_lyrics,
             commands::set_zoom,
+            commands::set_player_idle,
             commands::set_media_keys,
             commands::set_app_proxy,
             commands::open_external,
