@@ -12386,7 +12386,7 @@ function renderClickableArtists(container, rawArtist) {
     }
   });
 
-  function createPlaylist(name, initialTracks = [], cover = '') {
+  function createPlaylist(name, initialTracks = [], cover = '', skipNav = false) {
     if (!name || !name.trim()) return;
     const newPl = {
       id: 'pl_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
@@ -12401,7 +12401,7 @@ function renderClickableArtists(container, rawArtist) {
     state.playlists.push(newPl);
     localStorage.setItem('devsize_playlists', JSON.stringify(state.playlists));
     renderPlaylistsList();
-    openPlaylistDetail(newPl.id);
+    if (!skipNav) openPlaylistDetail(newPl.id);
     if (typeof hydrateMissingPlaylistCovers === 'function') {
       hydrateMissingPlaylistCovers(newPl);
     }
@@ -13720,7 +13720,7 @@ function bindCoverHoldZoom(wrapEl) {
   const btnImportYtPage = document.getElementById('btn-import-youtube-page');
   if (btnImportYtPage) {
     btnImportYtPage.addEventListener('click', () => {
-      if (typeof openLinkImportModal === 'function') openLinkImportModal('youtube');
+      if (typeof openLinkImportModal === 'function') openLinkImportModal('youtube', 'login');
     });
   }
 
@@ -19398,8 +19398,8 @@ function bindCoverHoldZoom(wrapEl) {
       return handleSpotifyLoginImport();
     }
 
-    const url = spotifyImportUrl ? spotifyImportUrl.value.trim() : '';
-    if (!url) {
+    const rawInput = spotifyImportUrl ? spotifyImportUrl.value.trim() : '';
+    if (!rawInput) {
       const errInfo = classifyImportError('spotify', 404, 'invalid spotify playlist url');
       showImportError(spotifyLinkError, errInfo);
       return;
@@ -19407,7 +19407,58 @@ function bindCoverHoldZoom(wrapEl) {
 
     clearImportError(spotifyLinkError);
     const targetVal = spotifyImportTarget ? spotifyImportTarget.value : 'new';
+
+    const playlistIdMatches = [...rawInput.matchAll(/(?:(?:https:\/\/)?open\.spotify\.com\/(?:embed\/)?playlist\/|spotify:playlist:)([a-zA-Z0-9]{22})/g)];
+    const uniqueIds = Array.from(new Set(playlistIdMatches.map(m => m[1])));
+
+    if (uniqueIds.length === 0) {
+      const errInfo = classifyImportError('spotify', 404, 'invalid spotify playlist url');
+      showImportError(spotifyLinkError, errInfo);
+      return;
+    }
+
     closeSpotifyImportModal();
+
+    if (uniqueIds.length > 1) {
+      showImportSpinnerToast(`Importing ${uniqueIds.length} Spotify playlists...`);
+      const hasBusy = typeof beginBusy === 'function';
+      if (hasBusy) beginBusy('import');
+      let successCount = 0;
+      let totalTracks = 0;
+      try {
+        for (let i = 0; i < uniqueIds.length; i++) {
+          const id = uniqueIds[i];
+          if (activeImportToast) {
+            const textSpan = activeImportToast.querySelector('.toast-text');
+            if (textSpan) textSpan.textContent = `Importing Spotify playlists (${i + 1}/${uniqueIds.length})...`;
+          }
+          try {
+            const res = await fetch(`http://127.0.0.1:${state.serverPort}/api/spotify-import?url=${encodeURIComponent('https://open.spotify.com/playlist/' + id)}`, { headers: spotifyHeaders });
+            const data = await res.json().catch(() => ({}));
+            if (data && data.success && Array.isArray(data.tracks) && data.tracks.length > 0) {
+              const foundTracks = await matchSpotifyTracks(data.tracks, data.name || 'Spotify Playlist', null, { playlistCover: '' });
+              createPlaylist(data.name || 'Spotify Playlist', foundTracks, data.cover || '', true);
+              successCount++;
+              totalTracks += foundTracks.length;
+            }
+          } catch (_) {}
+        }
+        dismissImportSpinnerToast();
+        showToast(`Imported ${successCount} playlists (${totalTracks} tracks)`, 'success');
+        renderPlaylistsList();
+        if (state.currentView === 'playlists' && typeof renderPlaylistsPage === 'function') {
+          renderPlaylistsPage();
+        }
+      } catch (e) {
+        dismissImportSpinnerToast();
+        showToast('Error importing playlists: ' + e.message, 'error');
+      } finally {
+        if (hasBusy && typeof endBusy === 'function') endBusy('import');
+      }
+      return;
+    }
+
+    const url = 'https://open.spotify.com/playlist/' + uniqueIds[0];
     showImportSpinnerToast('Importing playlist...');
 
     try {
@@ -19702,7 +19753,7 @@ function bindCoverHoldZoom(wrapEl) {
   }
   checkGoogleAuthStatus();
 
-  function openLinkImportModal(platform = '') {
+  function openLinkImportModal(platform = '', initialMode = null) {
     if (!linkImportModal) return;
     currentLinkImportPlatform = platform || 'youtube';
     clearImportError(linkImportError);
@@ -19724,7 +19775,7 @@ function bindCoverHoldZoom(wrapEl) {
       }
     }
 
-    setLinkImportMode('link');
+    setLinkImportMode(initialMode || (googleConnected ? 'login' : 'link'));
 
     if (linkImportUrl) {
       linkImportUrl.value = '';
@@ -20014,10 +20065,14 @@ function bindCoverHoldZoom(wrapEl) {
               hydrateMissingPlaylistCovers(targetPl);
             }
           } else {
-            createPlaylist(pl.name, plTracks, pl.cover || '');
+            createPlaylist(pl.name, plTracks, pl.cover || '', true);
             importedCount += plTracks.length;
             updateProgress(importedCount);
           }
+        }
+        renderPlaylistsList();
+        if (state.currentView === 'playlists' && typeof renderPlaylistsPage === 'function') {
+          renderPlaylistsPage();
         }
       }
 

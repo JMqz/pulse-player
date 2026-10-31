@@ -47,6 +47,11 @@ async function importGoogleLibrary(opts, { sapisid, fetchImpl }) {
     if (!node || typeof node !== 'object') return null;
     if (visited.has(node)) return null;
     visited.add(node);
+    if (node.continuationItemViewModel) {
+      const c = node.continuationItemViewModel.continuationCommand;
+      const t = c?.token || c?.continuationCommand?.token || c?.innertubeCommand?.continuationCommand?.token;
+      if (typeof t === 'string' && t) return t;
+    }
     if (typeof node.continuation === 'string' && node.continuation) return node.continuation;
     if (typeof node.token === 'string' && node.token) return node.token;
     if (node.continuationCommand && typeof node.continuationCommand.token === 'string') {
@@ -69,7 +74,44 @@ async function importGoogleLibrary(opts, { sapisid, fetchImpl }) {
       if (!node || typeof node !== 'object') return;
       if (visited.has(node)) return;
       visited.add(node);
-      if (node.musicResponsiveListItemRenderer) {
+      if (node.lockupViewModel) {
+        const l = node.lockupViewModel;
+        let videoId = (l.contentType === 'LOCKUP_CONTENT_TYPE_VIDEO') ? l.contentId : null;
+        if (!videoId && l.contentId && /^[a-zA-Z0-9_-]{11}$/.test(l.contentId)) videoId = l.contentId;
+        if (!videoId && l.rendererContext?.commandContext?.onTap?.innertubeCommand?.watchEndpoint?.videoId) {
+          videoId = l.rendererContext.commandContext.onTap.innertubeCommand.watchEndpoint.videoId;
+        }
+        if (videoId && !seenIds.has(videoId)) {
+          seenIds.add(videoId);
+          const meta = l.metadata?.lockupMetadataViewModel;
+          const title = meta?.title?.content || 'untitled';
+          let artist = '';
+          const rows = meta?.metadata?.contentMetadataViewModel?.metadataRows;
+          if (Array.isArray(rows) && rows[0]?.metadataParts && rows[0].metadataParts[0]?.text?.content) {
+            artist = rows[0].metadataParts[0].text.content;
+          }
+          let duration = 0;
+          const overlays = l.contentImage?.thumbnailViewModel?.overlays;
+          if (Array.isArray(overlays)) {
+            for (const ov of overlays) {
+              const badges = ov?.thumbnailOverlayBadgeViewModel?.thumbnailBadges;
+              if (Array.isArray(badges)) {
+                for (const b of badges) {
+                  const txt = b?.thumbnailBadgeViewModel?.text;
+                  if (typeof txt === 'string' && /^\d+:\d+(:\d+)?$/.test(txt.trim())) {
+                    duration = parseDurationSec(txt.trim());
+                    break;
+                  }
+                }
+              }
+              if (duration) break;
+            }
+          }
+          const sources = l.contentImage?.thumbnailViewModel?.image?.sources;
+          const cover = (Array.isArray(sources) && sources.length > 0) ? sources[sources.length - 1].url : '';
+          tracks.push({ videoId, title, artist, duration, cover });
+        }
+      } else if (node.musicResponsiveListItemRenderer) {
         const r = node.musicResponsiveListItemRenderer;
         let videoId = (r.playlistItemData && r.playlistItemData.videoId) ? r.playlistItemData.videoId : null;
         if (!videoId) {
@@ -146,7 +188,22 @@ async function importGoogleLibrary(opts, { sapisid, fetchImpl }) {
       if (!node || typeof node !== 'object') return;
       if (visited.has(node)) return;
       visited.add(node);
-      if (node.musicTwoRowItemRenderer) {
+      if (node.lockupViewModel) {
+        const l = node.lockupViewModel;
+        let id = (l.contentType === 'LOCKUP_CONTENT_TYPE_PLAYLIST') ? l.contentId : null;
+        if (!id && l.contentId && (l.contentId.startsWith('PL') || l.contentId.startsWith('VL') || l.contentId.startsWith('MPREb_') || l.contentId.startsWith('RD'))) {
+          id = l.contentId;
+        }
+        if (id && !seenIds.has(id) && id !== 'WL') {
+          seenIds.add(id);
+          const meta = l.metadata?.lockupMetadataViewModel;
+          const title = meta?.title?.content || 'Playlist';
+          const sources = l.contentImage?.collectionThumbnailViewModel?.primaryThumbnail?.thumbnailViewModel?.image?.sources
+            || l.contentImage?.thumbnailViewModel?.image?.sources;
+          const cover = (Array.isArray(sources) && sources.length > 0) ? sources[sources.length - 1].url : '';
+          playlists.push({ id, name: title, cover });
+        }
+      } else if (node.musicTwoRowItemRenderer) {
         const r = node.musicTwoRowItemRenderer;
         const title = extractText(r.title);
         let browseId = r.navigationEndpoint && r.navigationEndpoint.browseEndpoint && r.navigationEndpoint.browseEndpoint.browseId;
@@ -260,7 +317,15 @@ async function importGoogleLibrary(opts, { sapisid, fetchImpl }) {
       if (!nextToken || nextToken === token) break;
       token = nextToken;
     }
-    return playlists;
+    const unique = [];
+    const seen = new Set();
+    for (const pl of playlists) {
+      if (!pl.id || seen.has(pl.id)) continue;
+      if (pl.id === 'WL' || pl.id.startsWith('RD')) continue;
+      seen.add(pl.id);
+      unique.push(pl);
+    }
+    return unique;
   }
 
   try {
@@ -283,31 +348,29 @@ async function importGoogleLibrary(opts, { sapisid, fetchImpl }) {
     if (doPlaylists) {
       const rawPlaylists = await fetchAllPlaylists(playlistsBrowseId);
       for (const pl of rawPlaylists) {
+        if (doLikes && (pl.id === 'LL' || pl.id === 'LM')) continue;
         try {
           const plBrowseId = pl.id.startsWith('VL') ? pl.id : `VL${pl.id}`;
           const plTracks = await fetchAllTracks(plBrowseId);
-          playlists.push({
-            id: pl.id,
-            name: pl.name,
-            cover: pl.cover,
-            tracks: plTracks.map(t => ({
-              title: t.title,
-              artist: t.artist,
-              duration: t.duration,
-              id: t.videoId,
-              url: `https://www.youtube.com/watch?v=${t.videoId}`,
-              platform,
-              thumbnail: t.cover,
-              cover: t.cover
-            }))
-          });
+          if (plTracks && plTracks.length > 0) {
+            playlists.push({
+              id: pl.id,
+              name: pl.name,
+              cover: pl.cover,
+              tracks: plTracks.map(t => ({
+                title: t.title,
+                artist: t.artist,
+                duration: t.duration,
+                id: t.videoId,
+                url: `https://www.youtube.com/watch?v=${t.videoId}`,
+                platform,
+                thumbnail: t.cover,
+                cover: t.cover
+              }))
+            });
+          }
         } catch (e) {
-          playlists.push({
-            id: pl.id,
-            name: pl.name,
-            cover: pl.cover,
-            tracks: []
-          });
+          // Skip unfetchable playlist
         }
       }
     }
